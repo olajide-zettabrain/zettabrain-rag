@@ -1,0 +1,42 @@
+# -------------------------------------------------------
+# Generated at runtime — never commit these
+# -------------------------------------------------------
+src/zettabrain_vectorstore/
+src/ingested_files.json
+src/nfs_config.env
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+zettabrain-rag-env/
+zettabrain-rag/
+
+# Database files
+*.sqlite3
+*.bin
+*.pickle
+
+# Environment / secrets
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+/var/log/zettabrain*

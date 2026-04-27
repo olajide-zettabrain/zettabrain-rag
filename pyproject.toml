@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zettabrain-rag"
+version = "0.1.3"
+description = "Local private RAG pipeline — LangChain + Ollama + ChromaDB + NFS support"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [
+  { name = "Olajide", email = "olajide@zettabrain.io" }
+]
+keywords = ["rag", "llm", "langchain", "ollama", "chromadb", "local-ai", "private-ai", "nfs"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+  "langchain>=0.2.0",
+  "langchain-community>=0.2.0",
+  "langchain-ollama>=0.1.0",
+  "langchain-chroma>=0.1.0",
+  "langchain-core>=0.2.0",
+  "langchain-text-splitters>=0.2.0",
+  "chromadb>=0.5.0",
+  "pypdf>=4.0.0",
+  "python-docx>=1.1.0",
+  "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "black>=24.0",
+  "ruff>=0.4.0",
+  "build",
+  "twine",
+]
+
+[project.scripts]
+zettabrain        = "zettabrain_rag.cli:main"
+zettabrain-chat   = "zettabrain_rag.cli:chat_cmd"
+zettabrain-ingest = "zettabrain_rag.cli:ingest_cmd"
+zettabrain-setup  = "zettabrain_rag.cli:setup_cmd"
+zettabrain-status = "zettabrain_rag.cli:status_cmd"
+
+[project.urls]
+Homepage   = "https://github.com/zettabrain-io/zettabrain-rag"
+Repository = "https://github.com/zettabrain-io/zettabrain-rag"
+Issues     = "https://github.com/zettabrain-io/zettabrain-rag/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zettabrain_rag*"]
+
+[tool.setuptools.package-data]
+"zettabrain_rag" = [
+  "scripts/*.sh",
+  "scripts/*.py",
+  "scripts/*",
+]
