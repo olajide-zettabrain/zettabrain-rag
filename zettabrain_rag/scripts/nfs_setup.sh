@@ -196,25 +196,33 @@ RAG_DATA_PATH="${MOUNT_POINT}"
 ENVEOF
 success "Config saved: ${CONFIG_FILE}"
 
-# Detect Python — pipx venv first, then opt venv, then system
+# Detect Python — must be the one that has langchain packages installed
+# Priority: pipx venv → opt venv → system python3
 PYTHON_BIN=""
-PIPX_PYTHON=$(find /root/.local/share/pipx/venvs/zettabrain-rag \
-              /home/*/.local/share/pipx/venvs/zettabrain-rag \
-              -name "python3" 2>/dev/null | head -1)
 
-if [ -n "$PIPX_PYTHON" ] && [ -f "$PIPX_PYTHON" ]; then
-  PYTHON_BIN="$PIPX_PYTHON"
-  info "Using pipx Python: ${PYTHON_BIN}"
-elif [ -f "/opt/zettabrain/venv/bin/python3" ]; then
-  PYTHON_BIN="/opt/zettabrain/venv/bin/python3"
-  info "Using venv Python: ${PYTHON_BIN}"
-elif command -v python3 &>/dev/null; then
-  PYTHON_BIN="$(command -v python3)"
-  info "Using system Python: ${PYTHON_BIN}"
-else
-  error "python3 not found."
-  error "Run manually: cd ${DEPLOY_DIR} && python3 03_langchain_rag.py --rebuild"
-  exit 1
+for search_root in \
+    /root/.local/share/pipx/venvs/zettabrain-rag \
+    /opt/zettabrain/venv; do
+  candidate=$(find "$search_root" -name "python3" -type f 2>/dev/null | head -1)
+  if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+    if "$candidate" -c "import langchain_community" 2>/dev/null; then
+      PYTHON_BIN="$candidate"
+      info "Using Python with all packages: ${PYTHON_BIN}"
+      break
+    fi
+  fi
+done
+
+if [ -z "$PYTHON_BIN" ]; then
+  if command -v python3 &>/dev/null && python3 -c "import langchain_community" 2>/dev/null; then
+    PYTHON_BIN="$(command -v python3)"
+    info "Using system Python: ${PYTHON_BIN}"
+  else
+    error "No Python found with langchain packages installed."
+    error "Try: pipx upgrade --force zettabrain-rag"
+    error "Then re-run: sudo zettabrain-setup"
+    exit 1
+  fi
 fi
 
 # Verify RAG script exists
