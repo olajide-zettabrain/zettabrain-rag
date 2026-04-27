@@ -230,7 +230,7 @@ fi
 # -------------------------------------------------------
 # STEP 7 — SAVE CONFIG FOR RAG SCRIPTS
 # -------------------------------------------------------
-CONFIG_FILE="/zettabrain/src/nfs_config.env"
+CONFIG_FILE="/opt/zettabrain/src/nfs_config.env"
 mkdir -p "$(dirname "$CONFIG_FILE")"
 
 cat > "$CONFIG_FILE" << EOF
@@ -250,8 +250,8 @@ success "Config saved to: ${CONFIG_FILE}"
 echo ""
 echo -e "${CYAN}─── Step 6/6: Building RAG vector store ─────────────────${NC}"
 
-RAG_SCRIPT="/zettabrain/src/03_langchain_rag.py"
-VENV_PYTHON="/zettabrain/src/zettabrain-rag/bin/python3"
+RAG_SCRIPT="/opt/zettabrain/src/03_langchain_rag.py"
+VENV_PYTHON="/opt/zettabrain/src/zettabrain-rag/bin/python3"
 
 # Resolve which python3 to use
 if [ -f "$VENV_PYTHON" ]; then
@@ -263,7 +263,7 @@ elif command -v python3 &>/dev/null; then
 else
   error "python3 not found. Cannot trigger RAG rebuild."
   error "Activate your virtual environment and run manually:"
-  error "  cd /zettabrain/src && python3 03_langchain_rag.py --rebuild"
+  error "  cd /opt/zettabrain/src && python3 03_langchain_rag.py --rebuild"
   exit 1
 fi
 
@@ -271,7 +271,7 @@ fi
 if [ ! -f "$RAG_SCRIPT" ]; then
   error "RAG script not found at: ${RAG_SCRIPT}"
   error "Run manually once script is in place:"
-  error "  cd /zettabrain/src && python3 03_langchain_rag.py --rebuild"
+  error "  cd /opt/zettabrain/src && python3 03_langchain_rag.py --rebuild"
   exit 1
 fi
 
@@ -281,13 +281,13 @@ DOC_COUNT=$(find "$MOUNT_POINT" -type f \( -name "*.pdf" -o -name "*.txt" -o -na
 if [ "$DOC_COUNT" -eq 0 ]; then
   warn "No documents found in ${MOUNT_POINT} (*.pdf, *.txt, *.docx)."
   warn "Add your documents to the NFS share first, then run:"
-  warn "  cd /zettabrain/src && python3 03_langchain_rag.py --rebuild"
+  warn "  cd /opt/zettabrain/src && python3 03_langchain_rag.py --rebuild"
 else
   info "Found ${DOC_COUNT} document(s) in ${MOUNT_POINT} — starting RAG rebuild..."
   info "This may take several minutes depending on document count."
   echo ""
 
-  cd /zettabrain/src || exit 1
+  cd /opt/zettabrain/src || exit 1
 
   # Run rebuild — output streams live to terminal
   if "$PYTHON_BIN" "$RAG_SCRIPT" --rebuild; then
@@ -298,7 +298,7 @@ else
     echo ""
     error "RAG rebuild failed. Check the output above for details."
     error "Once resolved, re-run manually:"
-    error "  cd /zettabrain/src && python3 03_langchain_rag.py --rebuild"
+    error "  cd /opt/zettabrain/src && python3 03_langchain_rag.py --rebuild"
     log "RAG rebuild failed."
     exit 1
   fi
@@ -321,10 +321,10 @@ echo ""
 echo -e "${CYAN}─── Useful Commands ─────────────────────────────────────${NC}"
 echo ""
 echo -e "  Start RAG chat:"
-echo -e "     ${YELLOW}cd /zettabrain/src && python3 03_langchain_rag.py${NC}"
+echo -e "     ${YELLOW}cd /opt/zettabrain/src && python3 03_langchain_rag.py${NC}"
 echo ""
 echo -e "  Rebuild after adding new documents:"
-echo -e "     ${YELLOW}cd /zettabrain/src && python3 03_langchain_rag.py --rebuild${NC}"
+echo -e "     ${YELLOW}cd /opt/zettabrain/src && python3 03_langchain_rag.py --rebuild${NC}"
 echo ""
 echo -e "  Check mounted files:"
 echo -e "     ${YELLOW}ls -lh ${MOUNT_POINT}${NC}"
