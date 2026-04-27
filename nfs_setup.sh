@@ -2,7 +2,7 @@
 # ============================================================
 # ZettaBrain — NFS Mount Setup
 # Prompts user for NFS server details, mounts the share,
-# and validates the RAG data path is accessible.
+# validates connectivity, and triggers RAG vector store build.
 # ============================================================
 
 set -e
@@ -11,35 +11,29 @@ MOUNT_POINT="/mnt/Rag-data"
 FSTAB_FILE="/etc/fstab"
 LOG_FILE="/var/log/zettabrain-nfs-setup.log"
 NFS_OPTS="defaults,_netdev,nfsvers=4,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2"
+DEPLOY_DIR="/opt/zettabrain/src"
+CONFIG_FILE="${DEPLOY_DIR}/nfs_config.env"
+RAG_SCRIPT="${DEPLOY_DIR}/03_langchain_rag.py"
 
-# -------------------------------------------------------
-# COLOURS
-# -------------------------------------------------------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Colour
+NC='\033[0m'
 
-log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"; }
-info()    { echo -e "${CYAN}[INFO]${NC}  $*"; log "INFO  $*"; }
+log()     { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE" 2>/dev/null || true; }
+info()    { echo -e "${CYAN}[INFO]${NC}  $*";  log "INFO  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; log "OK    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; log "WARN  $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; log "ERROR $*"; }
 
-# -------------------------------------------------------
-# MUST RUN AS ROOT
-# -------------------------------------------------------
 if [ "$EUID" -ne 0 ]; then
-  error "This script must be run as root. Try: sudo $0"
+  error "This script must be run as root. Try: sudo zettabrain-setup"
   exit 1
 fi
 
-# -------------------------------------------------------
-# BANNER
-# -------------------------------------------------------
-clear
+clear 2>/dev/null || true
 echo ""
 echo -e "${BLUE}╔══════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║          ZettaBrain — NFS Storage Setup              ║${NC}"
@@ -48,15 +42,13 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 
 # -------------------------------------------------------
-# STEP 1 — COLLECT NFS DETAILS
+# COLLECT NFS DETAILS
 # -------------------------------------------------------
 echo -e "${CYAN}─── NFS Server Details ──────────────────────────────────${NC}"
 echo ""
 
-# NFS Server IP
 while true; do
   read -rp "  Enter NFS Server IP address: " NFS_SERVER_IP
-  # Basic IP format validation
   if [[ $NFS_SERVER_IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
     break
   else
@@ -64,7 +56,6 @@ while true; do
   fi
 done
 
-# NFS Export Path
 while true; do
   read -rp "  Enter NFS export path on server (e.g. /exports/rag-data): " NFS_EXPORT_PATH
   if [[ $NFS_EXPORT_PATH == /* ]]; then
@@ -74,7 +65,6 @@ while true; do
   fi
 done
 
-# Confirm mount point
 echo ""
 echo -e "  Default local mount point: ${GREEN}${MOUNT_POINT}${NC}"
 read -rp "  Use this path? [Y/n]: " CONFIRM_MOUNT
@@ -91,215 +81,170 @@ echo -e "${CYAN}─── Summary ───────────────�
 echo -e "  NFS Server  : ${GREEN}${NFS_SERVER_IP}${NC}"
 echo -e "  Export Path : ${GREEN}${NFS_EXPORT_PATH}${NC}"
 echo -e "  Mount Point : ${GREEN}${MOUNT_POINT}${NC}"
-echo -e "  NFS Options : ${GREEN}${NFS_OPTS}${NC}"
 echo ""
-read -rp "  Proceed with this configuration? [Y/n]: " CONFIRM
+read -rp "  Proceed? [Y/n]: " CONFIRM
 if [[ $CONFIRM =~ ^[Nn]$ ]]; then
-  info "Setup cancelled by user."
+  info "Setup cancelled."
   exit 0
 fi
-
 echo ""
 
 # -------------------------------------------------------
-# STEP 2 — INSTALL NFS CLIENT
+# STEP 1/6 — INSTALL NFS CLIENT
 # -------------------------------------------------------
-echo -e "${CYAN}─── Step 1/5: Installing NFS client ─────────────────────${NC}"
+echo -e "${CYAN}─── Step 1/6: Installing NFS client ─────────────────────${NC}"
 
 if command -v apt-get &>/dev/null; then
-  # Debian / Ubuntu
   info "Detected apt — installing nfs-common..."
-  apt-get update -qq && apt-get install -y -qq nfs-common
+  apt-get update -qq && apt-get install -y -qq nfs-common netcat-openbsd
 elif command -v yum &>/dev/null; then
-  # Amazon Linux / RHEL / CentOS
   info "Detected yum — installing nfs-utils..."
-  yum install -y -q nfs-utils
+  yum install -y -q nfs-utils nmap-ncat
 elif command -v dnf &>/dev/null; then
   info "Detected dnf — installing nfs-utils..."
-  dnf install -y -q nfs-utils
+  dnf install -y -q nfs-utils nmap-ncat
 else
-  warn "Could not detect package manager. Assuming NFS client is already installed."
+  warn "Cannot detect package manager — assuming NFS client is installed."
 fi
-
 success "NFS client ready."
 
 # -------------------------------------------------------
-# STEP 3 — PING NFS SERVER
+# STEP 2/6 — TEST CONNECTIVITY
 # -------------------------------------------------------
 echo ""
-echo -e "${CYAN}─── Step 2/5: Testing connectivity to NFS server ────────${NC}"
-
-# Use nc (netcat) as the primary connectivity check — more reliable than
-# ping on AWS where ICMP is commonly blocked by security groups
+echo -e "${CYAN}─── Step 2/6: Testing connectivity ──────────────────────${NC}"
 info "Testing NFS port 2049 on ${NFS_SERVER_IP}..."
 
 if command -v nc &>/dev/null; then
   if nc -zw5 "$NFS_SERVER_IP" 2049 &>/dev/null; then
-    success "NFS port 2049 is open on ${NFS_SERVER_IP} — server is reachable."
+    success "NFS port 2049 is open — server is reachable."
   else
-    error "Cannot reach NFS port 2049 on ${NFS_SERVER_IP}."
-    error "Check: security group inbound rules, NFS server firewall, and that"
-    error "the NFS service is running on the server (systemctl status nfs-server)."
+    error "Cannot reach port 2049 on ${NFS_SERVER_IP}."
+    error "Check: security group rules and NFS server firewall."
     exit 1
   fi
 else
-  # nc not available — fall back to ping as last resort
-  warn "netcat (nc) not found — falling back to ping test."
-  if ping -c 2 -W 3 "$NFS_SERVER_IP" &>/dev/null; then
-    success "NFS server ${NFS_SERVER_IP} responds to ping (port check skipped)."
-  else
-    error "Cannot reach NFS server at ${NFS_SERVER_IP} via ping or port check."
-    error "Install netcat for a more reliable test: apt-get install -y netcat-openbsd"
-    exit 1
-  fi
+  warn "netcat not found — skipping port check."
 fi
 
 # -------------------------------------------------------
-# STEP 4 — CREATE MOUNT POINT
+# STEP 3/6 — CREATE MOUNT POINT
 # -------------------------------------------------------
 echo ""
-echo -e "${CYAN}─── Step 3/5: Creating mount point ──────────────────────${NC}"
+echo -e "${CYAN}─── Step 3/6: Creating mount point ──────────────────────${NC}"
 
 if [ -d "$MOUNT_POINT" ]; then
   info "Mount point already exists: ${MOUNT_POINT}"
 else
   mkdir -p "$MOUNT_POINT"
-  success "Created mount point: ${MOUNT_POINT}"
+  success "Created: ${MOUNT_POINT}"
 fi
 
 # -------------------------------------------------------
-# STEP 5 — MOUNT THE NFS SHARE
+# STEP 4/6 — MOUNT NFS SHARE
 # -------------------------------------------------------
 echo ""
-echo -e "${CYAN}─── Step 4/5: Mounting NFS share ────────────────────────${NC}"
+echo -e "${CYAN}─── Step 4/6: Mounting NFS share ────────────────────────${NC}"
 
-# Unmount first if already mounted (clean remount)
 if mountpoint -q "$MOUNT_POINT"; then
-  warn "Something is already mounted at ${MOUNT_POINT} — unmounting first..."
+  warn "Already mounted at ${MOUNT_POINT} — unmounting first..."
   umount "$MOUNT_POINT"
 fi
 
 info "Mounting ${NFS_SERVER_IP}:${NFS_EXPORT_PATH} → ${MOUNT_POINT}..."
 
 if mount -t nfs -o "$NFS_OPTS" "${NFS_SERVER_IP}:${NFS_EXPORT_PATH}" "$MOUNT_POINT"; then
-  success "NFS share mounted successfully."
-else
-  error "Mount failed. Common causes:"
-  error "  - NFS export not configured on server for this client IP"
-  error "  - Wrong export path (check: showmount -e ${NFS_SERVER_IP})"
-  error "  - Firewall blocking port 2049"
-  exit 1
-fi
-
-# Verify mount is accessible
-if mountpoint -q "$MOUNT_POINT"; then
   FILE_COUNT=$(find "$MOUNT_POINT" -maxdepth 2 -type f 2>/dev/null | wc -l)
-  success "Mount point is active. Files visible: ${FILE_COUNT}"
+  success "Mounted successfully. Files visible: ${FILE_COUNT}"
 else
-  error "Mount point check failed even after successful mount command."
+  error "Mount failed."
+  error "  - Verify NFS export allows this client IP"
+  error "  - Check path with: showmount -e ${NFS_SERVER_IP}"
   exit 1
 fi
 
 # -------------------------------------------------------
-# STEP 6 — PERSIST IN /etc/fstab
+# STEP 5/6 — PERSIST IN /etc/fstab
 # -------------------------------------------------------
 echo ""
-echo -e "${CYAN}─── Step 5/5: Persisting mount in /etc/fstab ────────────${NC}"
+echo -e "${CYAN}─── Step 5/6: Persisting mount in /etc/fstab ────────────${NC}"
 
 FSTAB_ENTRY="${NFS_SERVER_IP}:${NFS_EXPORT_PATH}  ${MOUNT_POINT}  nfs  ${NFS_OPTS}  0  0"
 
-# Check if entry already exists
 if grep -qF "${NFS_SERVER_IP}:${NFS_EXPORT_PATH}" "$FSTAB_FILE"; then
-  warn "An entry for ${NFS_SERVER_IP}:${NFS_EXPORT_PATH} already exists in /etc/fstab — skipping."
+  warn "Entry already exists in /etc/fstab — skipping."
 else
-  # Backup fstab before editing
   cp "$FSTAB_FILE" "${FSTAB_FILE}.bak.$(date +%Y%m%d%H%M%S)"
-  echo "" >> "$FSTAB_FILE"
-  echo "# ZettaBrain NFS mount — added $(date '+%Y-%m-%d %H:%M:%S')" >> "$FSTAB_FILE"
-  echo "$FSTAB_ENTRY" >> "$FSTAB_FILE"
-  success "Added to /etc/fstab — mount will persist after reboot."
-fi
-
-# Validate fstab is not broken
-if mount -a --fake &>/dev/null; then
-  success "fstab validation passed."
-else
-  warn "fstab validation returned a warning — check /etc/fstab manually."
+  { echo ""; echo "# ZettaBrain NFS — $(date '+%Y-%m-%d %H:%M:%S')"; echo "$FSTAB_ENTRY"; } >> "$FSTAB_FILE"
+  success "Added to /etc/fstab — persists after reboot."
 fi
 
 # -------------------------------------------------------
-# STEP 7 — SAVE CONFIG FOR RAG SCRIPTS
-# -------------------------------------------------------
-CONFIG_FILE="/opt/zettabrain/src/nfs_config.env"
-mkdir -p "$(dirname "$CONFIG_FILE")"
-
-cat > "$CONFIG_FILE" << EOF
-# ZettaBrain NFS Configuration
-# Generated: $(date '+%Y-%m-%d %H:%M:%S')
-NFS_SERVER_IP="${NFS_SERVER_IP}"
-NFS_EXPORT_PATH="${NFS_EXPORT_PATH}"
-NFS_MOUNT_POINT="${MOUNT_POINT}"
-RAG_DATA_PATH="${MOUNT_POINT}"
-EOF
-
-success "Config saved to: ${CONFIG_FILE}"
-
-# -------------------------------------------------------
-# STEP 8 — TRIGGER RAG VECTOR STORE REBUILD
+# STEP 6/6 — BUILD RAG VECTOR STORE
 # -------------------------------------------------------
 echo ""
 echo -e "${CYAN}─── Step 6/6: Building RAG vector store ─────────────────${NC}"
 
-RAG_SCRIPT="/opt/zettabrain/src/03_langchain_rag.py"
-VENV_PYTHON="/opt/zettabrain/src/zettabrain-rag/bin/python3"
+# Save NFS config
+mkdir -p "$DEPLOY_DIR"
+cat > "$CONFIG_FILE" << ENVEOF
+# ZettaBrain NFS Configuration — $(date '+%Y-%m-%d %H:%M:%S')
+NFS_SERVER_IP="${NFS_SERVER_IP}"
+NFS_EXPORT_PATH="${NFS_EXPORT_PATH}"
+NFS_MOUNT_POINT="${MOUNT_POINT}"
+RAG_DATA_PATH="${MOUNT_POINT}"
+ENVEOF
+success "Config saved: ${CONFIG_FILE}"
 
-# Resolve which python3 to use
-if [ -f "$VENV_PYTHON" ]; then
-  PYTHON_BIN="$VENV_PYTHON"
-  info "Using virtual environment: ${VENV_PYTHON}"
+# Detect Python — pipx venv first, then opt venv, then system
+PYTHON_BIN=""
+PIPX_PYTHON=$(find /root/.local/share/pipx/venvs/zettabrain-rag \
+              /home/*/.local/share/pipx/venvs/zettabrain-rag \
+              -name "python3" 2>/dev/null | head -1)
+
+if [ -n "$PIPX_PYTHON" ] && [ -f "$PIPX_PYTHON" ]; then
+  PYTHON_BIN="$PIPX_PYTHON"
+  info "Using pipx Python: ${PYTHON_BIN}"
+elif [ -f "/opt/zettabrain/venv/bin/python3" ]; then
+  PYTHON_BIN="/opt/zettabrain/venv/bin/python3"
+  info "Using venv Python: ${PYTHON_BIN}"
 elif command -v python3 &>/dev/null; then
-  PYTHON_BIN="python3"
-  info "Using system python3: $(which python3)"
+  PYTHON_BIN="$(command -v python3)"
+  info "Using system Python: ${PYTHON_BIN}"
 else
-  error "python3 not found. Cannot trigger RAG rebuild."
-  error "Activate your virtual environment and run manually:"
-  error "  cd /opt/zettabrain/src && python3 03_langchain_rag.py --rebuild"
+  error "python3 not found."
+  error "Run manually: cd ${DEPLOY_DIR} && python3 03_langchain_rag.py --rebuild"
   exit 1
 fi
 
-# Check RAG script exists
+# Verify RAG script exists
 if [ ! -f "$RAG_SCRIPT" ]; then
   error "RAG script not found at: ${RAG_SCRIPT}"
-  error "Run manually once script is in place:"
-  error "  cd /opt/zettabrain/src && python3 03_langchain_rag.py --rebuild"
+  error "Run: zettabrain-chat --rebuild"
   exit 1
 fi
 
-# Count files on NFS mount before triggering rebuild
-DOC_COUNT=$(find "$MOUNT_POINT" -type f \( -name "*.pdf" -o -name "*.txt" -o -name "*.docx" \) 2>/dev/null | wc -l)
+# Count documents
+DOC_COUNT=$(find "$MOUNT_POINT" \
+  -type f \( -name "*.pdf" -o -name "*.txt" -o -name "*.docx" -o -name "*.md" \) \
+  2>/dev/null | wc -l)
 
 if [ "$DOC_COUNT" -eq 0 ]; then
-  warn "No documents found in ${MOUNT_POINT} (*.pdf, *.txt, *.docx)."
-  warn "Add your documents to the NFS share first, then run:"
-  warn "  cd /opt/zettabrain/src && python3 03_langchain_rag.py --rebuild"
+  warn "No documents found in ${MOUNT_POINT}."
+  warn "Add documents then run: zettabrain-chat --rebuild"
 else
-  info "Found ${DOC_COUNT} document(s) in ${MOUNT_POINT} — starting RAG rebuild..."
-  info "This may take several minutes depending on document count."
+  info "Found ${DOC_COUNT} document(s) — building vector store..."
   echo ""
+  cd "$DEPLOY_DIR" || exit 1
 
-  cd /opt/zettabrain/src || exit 1
-
-  # Run rebuild — output streams live to terminal
   if "$PYTHON_BIN" "$RAG_SCRIPT" --rebuild; then
     echo ""
-    success "RAG vector store rebuilt successfully."
-    log "RAG rebuild completed. Documents: ${DOC_COUNT}"
+    success "Vector store built successfully."
+    log "RAG rebuild complete. Docs: ${DOC_COUNT}"
   else
     echo ""
-    error "RAG rebuild failed. Check the output above for details."
-    error "Once resolved, re-run manually:"
-    error "  cd /opt/zettabrain/src && python3 03_langchain_rag.py --rebuild"
-    log "RAG rebuild failed."
+    error "RAG rebuild failed. Run manually:"
+    error "  cd ${DEPLOY_DIR} && python3 03_langchain_rag.py --rebuild"
     exit 1
   fi
 fi
@@ -312,28 +257,19 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║         ZettaBrain Setup Complete!                   ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  NFS Share    : ${GREEN}${NFS_SERVER_IP}:${NFS_EXPORT_PATH}${NC}"
-echo -e "  Mounted at   : ${GREEN}${MOUNT_POINT}${NC}"
-echo -e "  Documents    : ${GREEN}${DOC_COUNT} file(s)${NC}"
-echo -e "  Config file  : ${GREEN}${CONFIG_FILE}${NC}"
-echo -e "  Log file     : ${GREEN}${LOG_FILE}${NC}"
+echo -e "  NFS Share   : ${GREEN}${NFS_SERVER_IP}:${NFS_EXPORT_PATH}${NC}"
+echo -e "  Mounted at  : ${GREEN}${MOUNT_POINT}${NC}"
+echo -e "  Documents   : ${GREEN}${DOC_COUNT} file(s)${NC}"
+echo -e "  Scripts dir : ${GREEN}${DEPLOY_DIR}${NC}"
+echo -e "  Config      : ${GREEN}${CONFIG_FILE}${NC}"
+echo -e "  Log         : ${GREEN}${LOG_FILE}${NC}"
 echo ""
 echo -e "${CYAN}─── Useful Commands ─────────────────────────────────────${NC}"
 echo ""
-echo -e "  Start RAG chat:"
-echo -e "     ${YELLOW}cd /opt/zettabrain/src && python3 03_langchain_rag.py${NC}"
-echo ""
-echo -e "  Rebuild after adding new documents:"
-echo -e "     ${YELLOW}cd /opt/zettabrain/src && python3 03_langchain_rag.py --rebuild${NC}"
-echo ""
-echo -e "  Check mounted files:"
-echo -e "     ${YELLOW}ls -lh ${MOUNT_POINT}${NC}"
-echo ""
-echo -e "  Remount after reboot (auto via fstab):"
-echo -e "     ${YELLOW}mount -a${NC}"
-echo ""
-echo -e "  Unmount:"
-echo -e "     ${YELLOW}umount ${MOUNT_POINT}${NC}"
+echo -e "  Start chatting  : ${YELLOW}zettabrain-chat${NC}"
+echo -e "  Rebuild index   : ${YELLOW}zettabrain-chat --rebuild${NC}"
+echo -e "  Check documents : ${YELLOW}ls -lh ${MOUNT_POINT}${NC}"
+echo -e "  Remount (reboot): ${YELLOW}mount -a${NC}"
 echo ""
 
-log "Setup completed successfully. NFS: ${NFS_SERVER_IP}:${NFS_EXPORT_PATH} -> ${MOUNT_POINT} | Docs: ${DOC_COUNT}"
+log "Setup complete. NFS: ${NFS_SERVER_IP}:${NFS_EXPORT_PATH} -> ${MOUNT_POINT}"
