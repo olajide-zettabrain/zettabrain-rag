@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zettabrain-rag"
-version = "0.1.6"
-description = "Local private RAG pipeline — LangChain + Ollama + ChromaDB + NFS support"
+version = "0.1.7"
+description = "Local private RAG pipeline with GUI — LangChain + Ollama + ChromaDB + NFS"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
 authors = [
   { name = "Olajide", email = "olajide@zettabrain.io" }
 ]
-keywords = ["rag", "llm", "langchain", "ollama", "chromadb", "local-ai", "private-ai", "nfs"]
+keywords = ["rag", "llm", "langchain", "ollama", "chromadb", "local-ai", "private-ai", "nfs", "gui"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -37,6 +37,9 @@ dependencies = [
   "pypdf>=4.0.0",
   "python-docx>=1.1.0",
   "requests>=2.31.0",
+  "fastapi>=0.111.0",
+  "uvicorn[standard]>=0.29.0",
+  "websockets>=12.0",
 ]
 
 [project.optional-dependencies]
@@ -54,11 +57,12 @@ zettabrain-chat   = "zettabrain_rag.cli:chat_cmd"
 zettabrain-ingest = "zettabrain_rag.cli:ingest_cmd"
 zettabrain-setup  = "zettabrain_rag.cli:setup_cmd"
 zettabrain-status = "zettabrain_rag.cli:status_cmd"
+zettabrain-server = "zettabrain_rag.cli:server_cmd"
 
 [project.urls]
-Homepage   = "https://github.com/zettabrain-io/zettabrain-rag"
-Repository = "https://github.com/zettabrain-io/zettabrain-rag"
-Issues     = "https://github.com/zettabrain-io/zettabrain-rag/issues"
+Homepage   = "https://github.com/olajide-zettabrain/zettabrain-rag"
+Repository = "https://github.com/olajide-zettabrain/zettabrain-rag"
+Issues     = "https://github.com/olajide-zettabrain/zettabrain-rag/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -69,4 +73,8 @@ include = ["zettabrain_rag*"]
   "scripts/*.sh",
   "scripts/*.py",
   "scripts/*",
+  "static/*.html",
+  "static/*.css",
+  "static/*.js",
+  "static/*",
 ]

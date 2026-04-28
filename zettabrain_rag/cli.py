@@ -243,3 +243,42 @@ def status_cmd():
         print("Vector store : not built yet")
         print("Run: sudo zettabrain-setup")
     print()
+
+
+# -------------------------------------------------------
+# zettabrain-server  (GUI web server)
+# -------------------------------------------------------
+def server_cmd():
+    """Launch the ZettaBrain web GUI."""
+    import importlib.util
+
+    _deploy_scripts()
+    _banner()
+
+    # Check uvicorn is available
+    if importlib.util.find_spec("uvicorn") is None:
+        print("ERROR: uvicorn not installed.")
+        print("Run: pip install 'zettabrain-rag[server]'")
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(
+        prog="zettabrain-server",
+        description="Launch the ZettaBrain web GUI"
+    )
+    parser.add_argument("--host", default="0.0.0.0",  help="Host to bind (default: 0.0.0.0)")
+    parser.add_argument("--port", default=7860, type=int, help="Port to listen on (default: 7860)")
+    parser.add_argument("--reload", action="store_true", help="Auto-reload on code changes (dev mode)")
+    args, _ = parser.parse_known_args()
+
+    print(f"Starting ZettaBrain GUI...")
+    print(f"Open in browser: http://localhost:{args.port}")
+    print(f"Press Ctrl+C to stop.\n")
+
+    import uvicorn
+    uvicorn.run(
+        "zettabrain_rag.server:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level="warning",  # suppress noise
+    )
