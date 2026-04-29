@@ -28,14 +28,40 @@ from langchain_core.output_parsers import StrOutputParser
 
 # -------------------------------------------------------
 # CONFIGURATION
+# Priority: env var > zettabrain.env file > hardcoded fallback
 # -------------------------------------------------------
-DOCS_FOLDER   = "/mnt/Rag-data"
-CHROMA_PATH   = "./zettabrain_vectorstore"
-EMBED_MODEL   = "nomic-embed-text"
-LLM_MODEL     = "llama3.1:8b"
-CHUNK_SIZE    = 1500    # larger = more context per chunk
-CHUNK_OVERLAP = 200     # more overlap = fewer missed boundaries
-DEBUG         = False   # set True to see retrieved chunks on every query
+
+def _load_zettabrain_env() -> dict:
+    """Load zettabrain.env config file if it exists."""
+    cfg = {}
+    env_paths = [
+        "/opt/zettabrain/src/zettabrain.env",
+        "/zettabrain/src/zettabrain.env",
+    ]
+    for p in env_paths:
+        if os.path.exists(p):
+            with open(p) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip().strip('"').strip("'")
+            break
+    return cfg
+
+_cfg = _load_zettabrain_env()
+
+def _get(key: str, fallback: str) -> str:
+    """Get config value: env var overrides file which overrides fallback."""
+    return os.environ.get(key) or _cfg.get(key) or fallback
+
+DOCS_FOLDER   = _get("ZETTABRAIN_DOCS",        _get("RAG_DATA_PATH", "/opt/zettabrain/data"))
+CHROMA_PATH   = _get("ZETTABRAIN_CHROMA",       "/opt/zettabrain/src/zettabrain_vectorstore")
+EMBED_MODEL   = _get("ZETTABRAIN_EMBED_MODEL",  "nomic-embed-text")
+LLM_MODEL     = _get("ZETTABRAIN_LLM_MODEL",    "llama3.1:8b")
+CHUNK_SIZE    = int(_get("ZETTABRAIN_CHUNK_SIZE",    "1500"))
+CHUNK_OVERLAP = int(_get("ZETTABRAIN_CHUNK_OVERLAP", "200"))
+DEBUG         = False
 
 
 # -------------------------------------------------------

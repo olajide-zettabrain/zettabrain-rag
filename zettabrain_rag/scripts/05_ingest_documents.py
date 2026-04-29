@@ -26,8 +26,26 @@ from langchain_chroma import Chroma
 # -------------------------------------------------------
 # CONFIGURATION
 # -------------------------------------------------------
-DOCS_FOLDER = os.environ.get("ZETTABRAIN_DOCS",   "/mnt/Rag-data")
-CHROMA_PATH = os.environ.get("ZETTABRAIN_CHROMA", "./zettabrain_vectorstore")
+def _load_zettabrain_env() -> dict:
+    cfg = {}
+    for p in ["/opt/zettabrain/src/zettabrain.env", "/zettabrain/src/zettabrain.env"]:
+        if os.path.exists(p):
+            with open(p) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip().strip('"').strip("'")
+            break
+    return cfg
+
+_cfg = _load_zettabrain_env()
+
+def _get(key, fallback):
+    return os.environ.get(key) or _cfg.get(key) or fallback
+
+DOCS_FOLDER = _get("ZETTABRAIN_DOCS",    _get("RAG_DATA_PATH", "/opt/zettabrain/data"))
+CHROMA_PATH = _get("ZETTABRAIN_CHROMA",  "/opt/zettabrain/src/zettabrain_vectorstore")
 EMBED_MODEL = os.environ.get("ZETTABRAIN_EMBED_MODEL", "nomic-embed-text")
 HASH_CACHE  = "./ingested_files.json"
 
@@ -151,7 +169,7 @@ def main():
         folder = Path(args.folder)
         if not folder.exists():
             print(f"ERROR: Folder not found: {folder}")
-            print("Check your NFS mount: ls /mnt/Rag-data")
+            print(f"Check the path exists: ls {DOCS_FOLDER}")
             return
 
         files = [f for f in folder.rglob("*") if f.suffix.lower() in SUPPORTED]
