@@ -331,26 +331,77 @@ async def websocket_chat(websocket: WebSocket):
                     f"QUESTION: {question}\n\nANSWER:"
                 )
 
-                response    = requests.post(
-                    f"{OLLAMA_URL}/api/generate",
-                    json={"model": model, "prompt": prompt_text, "stream": True},
-                    stream=True, timeout=120
-                )
+                import asyncio
+
+                loop  = asyncio.get_event_loop()
+                queue: asyncio.Queue = asyncio.Queue()
+
+                def _stream_ollama():
+                    try:
+                        resp = requests.post(
+                            f"{OLLAMA_URL}/api/generate",
+                            json={"model": model, "prompt": prompt_text, "stream": True},
+                            stream=True, timeout=120,
+                        )
+                        if resp.status_code != 200:
+                            asyncio.run_coroutine_threadsafe(
+                                queue.put(("error", f"Ollama {resp.status_code}: {resp.text[:300]}")), loop
+                            )
+                            return
+                        for line in resp.iter_lines():
+                            if line:
+                                chunk = json.loads(line)
+                                if "error" in chunk:
+                                    asyncio.run_coroutine_threadsafe(
+                                        queue.put(("error", f"Ollama: {chunk['error']}")), loop
+                                    )
+                                    return
+                                token = chunk.get("response", "")
+                                asyncio.run_coroutine_threadsafe(
+                                    queue.put(("token", token)), loop
+                                )
+                                if chunk.get("done"):
+                                    break
+                    except Exception as exc:
+                        asyncio.run_coroutine_threadsafe(
+                            queue.put(("error", str(exc))), loop
+                        )
+                    finally:
+                        asyncio.run_coroutine_threadsafe(
+                            queue.put(("done", None)), loop
+                        )
+
+                loop.run_in_executor(None, _stream_ollama)
 
                 full_answer = ""
-                for line in response.iter_lines():
-                    if line:
-                        chunk = json.loads(line)
-                        token = chunk.get("response", "")
-                        full_answer += token
-                        await websocket.send_json({"type": "token", "token": token})
-                        if chunk.get("done"):
-                            break
+                error_msg   = None
+                while True:
+                    kind, value = await queue.get()
+                    if kind == "token":
+                        full_answer += value
+                        await websocket.send_json({"type": "token", "token": value})
+                    elif kind == "error":
+                        error_msg = value
+                        break
+                    else:  # "done"
+                        break
+
+                if error_msg:
+                    await websocket.send_json({"type": "error", "message": error_msg})
+                    continue
+
+                if not full_answer.strip():
+                    await websocket.send_json({
+                        "type":    "error",
+                        "message": f"Ollama returned an empty response. "
+                                   f"Check that '{model}' is pulled: ollama pull {model}",
+                    })
+                    continue
 
                 await websocket.send_json({
-                    "type":           "done",
-                    "answer":         full_answer,
-                    "model":          model,
+                    "type":            "done",
+                    "answer":          full_answer,
+                    "model":           model,
                     "chunks_searched": len(sources),
                 })
 
