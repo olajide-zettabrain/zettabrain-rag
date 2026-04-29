@@ -188,7 +188,7 @@
         <div class="logo-icon">⚡</div>
         <div>
           <div class="logo-text">ZettaBrain</div>
-          <div class="logo-version">Local RAG v0.1.6</div>
+          <div class="logo-version">Local RAG v0.2.4</div>
         </div>
       </div>
     </div>
@@ -205,7 +205,7 @@
         <div class="dot" id="dot-vector"></div>
       </div>
       <div class="status-row">
-        <span class="status-label">NFS Mount</span>
+        <span class="status-label">Storage</span>
         <div class="dot" id="dot-nfs"></div>
       </div>
     </div>
@@ -297,11 +297,11 @@
         <div class="panel-section">
           <h3>📂 Ingest Documents</h3>
           <p style="color:var(--text2); font-size:13px; margin-bottom:14px;">
-            Index documents from your NFS share into the vector store. Supports PDF, TXT, MD, DOCX.
+            Index documents from your storage into the vector store. Supports PDF, TXT, MD, DOCX.
           </p>
           <div class="form-row">
             <input class="input-field" id="ingest-folder" type="text"
-              placeholder="Folder path (default: /mnt/Rag-data)" />
+              placeholder="Folder path (leave blank to use configured storage path)" />
             <button class="btn btn-primary" id="ingest-btn" onclick="runIngest()">Start Ingest</button>
           </div>
           <label class="checkbox-row">
@@ -408,14 +408,14 @@ async function refreshStatus() {
     // Dots
     setDot('dot-ollama', status.ollama.running ? 'green' : 'red');
     setDot('dot-vector', status.vectorstore.chunks > 0 ? 'green' : status.vectorstore.exists ? 'yellow' : 'red');
-    setDot('dot-nfs', status.nfs.configured ? (status.nfs.doc_count > 0 ? 'green' : 'yellow') : 'red');
+    setDot('dot-nfs', status.storage.configured ? (status.storage.doc_count > 0 ? 'green' : 'yellow') : 'red');
 
     // Stats
     document.getElementById('stat-chunks').textContent = fmtNum(status.vectorstore.chunks);
-    document.getElementById('stat-docs').textContent   = fmtNum(status.nfs.doc_count);
+    document.getElementById('stat-docs').textContent   = fmtNum(status.storage.doc_count);
     document.getElementById('ingest-chunks').textContent   = fmtNum(status.vectorstore.chunks);
     document.getElementById('ingest-files').textContent    = fmtNum(status.sources.length);
-    document.getElementById('ingest-nfs-docs').textContent = fmtNum(status.nfs.doc_count);
+    document.getElementById('ingest-nfs-docs').textContent = fmtNum(status.storage.doc_count);
 
     // Models
     const sel = document.getElementById('model-select');

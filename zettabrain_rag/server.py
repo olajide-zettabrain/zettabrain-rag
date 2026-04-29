@@ -43,10 +43,10 @@ def _load_config() -> dict:
 
 _cfg = _load_config()
 
-OLLAMA_URL   = _cfg.get("OLLAMA_HOST",            os.environ.get("OLLAMA_HOST",            "http://localhost:11434"))
-LLM_MODEL    = _cfg.get("ZETTABRAIN_LLM_MODEL",   os.environ.get("ZETTABRAIN_LLM_MODEL",   "llama3.1:8b"))
-EMBED_MODEL  = _cfg.get("ZETTABRAIN_EMBED_MODEL",  os.environ.get("ZETTABRAIN_EMBED_MODEL",  "nomic-embed-text"))
-DOCS_FOLDER  = _cfg.get("RAG_DATA_PATH",           os.environ.get("ZETTABRAIN_DOCS",         "/mnt/Rag-data"))
+OLLAMA_URL   = os.environ.get("OLLAMA_HOST")           or _cfg.get("OLLAMA_HOST")           or "http://localhost:11434"
+LLM_MODEL    = os.environ.get("ZETTABRAIN_LLM_MODEL")  or _cfg.get("ZETTABRAIN_LLM_MODEL")  or "llama3.1:8b"
+EMBED_MODEL  = os.environ.get("ZETTABRAIN_EMBED_MODEL") or _cfg.get("ZETTABRAIN_EMBED_MODEL") or "nomic-embed-text"
+DOCS_FOLDER  = os.environ.get("ZETTABRAIN_DOCS")        or _cfg.get("RAG_DATA_PATH")         or "/opt/zettabrain/data"
 STORAGE_TYPE = _cfg.get("STORAGE_TYPE",            "local")
 CERT_FILE    = _cfg.get("ZETTABRAIN_CERT",         str(CERT_DIR / "cert.pem"))
 KEY_FILE     = _cfg.get("ZETTABRAIN_KEY",          str(CERT_DIR / "key.pem"))
@@ -179,9 +179,10 @@ async def status():
             "path":   str(CHROMA_PATH),
         },
         "storage": {
-            "type":      STORAGE_TYPE,
-            "path":      DOCS_FOLDER,
-            "doc_count": doc_count,
+            "type":       STORAGE_TYPE,
+            "path":       DOCS_FOLDER,
+            "doc_count":  doc_count,
+            "configured": Path(DOCS_FOLDER).exists(),
         },
         "tls":     _get_tls_info(),
         "sources": sources,
