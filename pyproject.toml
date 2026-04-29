@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zettabrain-rag"
-version = "0.2.3"
+version = "0.2.4"
 description = "Local private RAG pipeline with GUI — LangChain + Ollama + ChromaDB + NFS"
 readme = "README.md"
 license = { text = "MIT" }
