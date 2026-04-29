@@ -1,15 +1,5 @@
 """
-ZettaBrain RAG — CLI entry points.
-
-Installed commands:
-  zettabrain          — help / version
-  zettabrain-chat     — start interactive RAG chat
-  zettabrain-ingest   — ingest documents
-  zettabrain-setup    — NFS mount wizard
-  zettabrain-status   — vector store statistics
-
-On first run, all bundled scripts are automatically deployed
-to /opt/zettabrain/src so they are available to the CLI.
+ZettaBrain RAG — CLI entry points v0.2.0
 """
 
 import argparse
@@ -21,15 +11,13 @@ from pathlib import Path
 
 from . import __version__
 
-# -------------------------------------------------------
-# Paths
-# -------------------------------------------------------
-PKG_DIR      = Path(__file__).parent                       # installed package dir
-SCRIPTS_DIR  = PKG_DIR / "scripts"                        # bundled scripts
-DEPLOY_DIR   = Path("/opt/zettabrain/src")                 # where scripts live at runtime
-NFS_SCRIPT   = SCRIPTS_DIR / "nfs_setup.sh"               # bundled NFS wizard
+PKG_DIR     = Path(__file__).parent
+SCRIPTS_DIR = PKG_DIR / "scripts"
+SETUP_SCRIPT = SCRIPTS_DIR / "setup.sh"          # new unified setup script
+DEPLOY_DIR  = Path("/opt/zettabrain/src")
+CERT_DIR    = Path("/opt/zettabrain/certs")
+CONFIG_FILE = DEPLOY_DIR / "zettabrain.env"
 
-# Scripts to deploy from package → /opt/zettabrain/src
 DEPLOY_SCRIPTS = [
     "03_langchain_rag.py",
     "05_ingest_documents.py",
@@ -38,39 +26,27 @@ DEPLOY_SCRIPTS = [
 ]
 
 
-# -------------------------------------------------------
-# Auto-deploy bundled scripts to /opt/zettabrain/src
-# Called on every CLI entry point so scripts are always present
-# -------------------------------------------------------
 def _deploy_scripts():
-    """Copy bundled Python scripts to DEPLOY_DIR if not already present."""
     try:
         DEPLOY_DIR.mkdir(parents=True, exist_ok=True)
     except PermissionError:
-        # Non-root user — skip deploy, scripts may already be there
         return
-
-    for script_name in DEPLOY_SCRIPTS:
-        src  = SCRIPTS_DIR / script_name
-        dest = DEPLOY_DIR  / script_name
+    for name in DEPLOY_SCRIPTS:
+        src  = SCRIPTS_DIR / name
+        dest = DEPLOY_DIR  / name
         if src.exists() and not dest.exists():
             shutil.copy2(src, dest)
             dest.chmod(0o755)
 
 
 def _find_script(name: str) -> Path:
-    """Find a deployed script, falling back to bundled version."""
-    deployed = DEPLOY_DIR / name
-    if deployed.exists():
-        return deployed
-    bundled = SCRIPTS_DIR / name
-    if bundled.exists():
-        return bundled
-    return deployed  # return expected path so error message is helpful
+    for p in [DEPLOY_DIR / name, SCRIPTS_DIR / name]:
+        if p.exists():
+            return p
+    return DEPLOY_DIR / name
 
 
 def _find_python() -> str:
-    """Return the best available python3 interpreter."""
     venv = os.environ.get("VIRTUAL_ENV")
     if venv:
         p = Path(venv) / "bin" / "python3"
@@ -79,16 +55,23 @@ def _find_python() -> str:
     return sys.executable
 
 
+def _load_config() -> dict:
+    cfg = {}
+    if CONFIG_FILE.exists():
+        for line in CONFIG_FILE.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip().strip('"')
+    return cfg
+
+
 def _require(path: Path):
     if not path.exists():
         print(f"ERROR: Script not found: {path}")
-        print("Try reinstalling: pipx reinstall zettabrain-rag")
+        print("Try: pipx reinstall zettabrain-rag")
         sys.exit(1)
 
 
-# -------------------------------------------------------
-# Helpers
-# -------------------------------------------------------
 def _banner():
     print(f"\n╔══════════════════════════════════════════════════════╗")
     print(f"║        ZettaBrain RAG  v{__version__:<29}║")
@@ -97,45 +80,43 @@ def _banner():
 
 
 # -------------------------------------------------------
-# zettabrain  (root help)
+# zettabrain
 # -------------------------------------------------------
 def main():
     _deploy_scripts()
     _banner()
     parser = argparse.ArgumentParser(
         prog="zettabrain",
-        description="ZettaBrain RAG — local private AI over your documents",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Commands:
-  sudo zettabrain-setup    NFS mount wizard + build vector store
+  sudo zettabrain-setup    Storage wizard (Local/NFS/SMB) + TLS cert + vector store
   zettabrain-ingest        Ingest documents into the vector store
-  zettabrain-chat          Start interactive RAG chat session
+  zettabrain-chat          Start interactive RAG chat (CLI)
+  zettabrain-server        Launch secure HTTPS web GUI
   zettabrain-status        Show install info and vector store statistics
         """
     )
-    parser.add_argument(
-        "--version", action="version",
-        version=f"zettabrain-rag {__version__}"
-    )
+    parser.add_argument("--version", action="version",
+                        version=f"zettabrain-rag {__version__}")
     parser.parse_args()
 
 
 # -------------------------------------------------------
-# zettabrain-setup  (NFS wizard)
+# zettabrain-setup
 # -------------------------------------------------------
 def setup_cmd():
     _deploy_scripts()
     _banner()
-    _require(NFS_SCRIPT)
+    _require(SETUP_SCRIPT)
 
     if os.geteuid() != 0:
-        print("ERROR: NFS setup requires root privileges.")
+        print("ERROR: Storage setup requires root privileges.")
         print("Run:   sudo zettabrain-setup\n")
         sys.exit(1)
 
-    NFS_SCRIPT.chmod(0o755)
-    result = subprocess.run(["bash", str(NFS_SCRIPT)])
+    SETUP_SCRIPT.chmod(0o755)
+    result = subprocess.run(["bash", str(SETUP_SCRIPT)])
     sys.exit(result.returncode)
 
 
@@ -145,18 +126,14 @@ def setup_cmd():
 def ingest_cmd():
     _deploy_scripts()
     _banner()
-
     script = _find_script("05_ingest_documents.py")
     _require(script)
 
-    parser = argparse.ArgumentParser(
-        prog="zettabrain-ingest",
-        description="Ingest documents from NFS share into the vector store"
-    )
-    parser.add_argument("--folder",  default=None,        help="Documents folder (default: /mnt/Rag-data)")
-    parser.add_argument("--file",    default=None,        help="Ingest a single file")
-    parser.add_argument("--clear",   action="store_true", help="Clear the entire vector store")
-    parser.add_argument("--stats",   action="store_true", help="Show vector store statistics")
+    parser = argparse.ArgumentParser(prog="zettabrain-ingest")
+    parser.add_argument("--folder",  default=None,        help="Documents folder")
+    parser.add_argument("--file",    default=None,        help="Single file to ingest")
+    parser.add_argument("--clear",   action="store_true", help="Clear vector store")
+    parser.add_argument("--stats",   action="store_true", help="Show stats")
     parser.add_argument("--rebuild", action="store_true", help="Force full rebuild")
     args, _ = parser.parse_known_args()
 
@@ -176,17 +153,12 @@ def ingest_cmd():
 def chat_cmd():
     _deploy_scripts()
     _banner()
-
     script = _find_script("03_langchain_rag.py")
     _require(script)
 
-    parser = argparse.ArgumentParser(
-        prog="zettabrain-chat",
-        description="Start an interactive RAG chat session"
-    )
-    parser.add_argument("--rebuild", action="store_true", help="Force rebuild vector store before chat")
-    parser.add_argument("--debug",   action="store_true", help="Show retrieved chunks on every query")
-    parser.add_argument("--model",   default=None,        help="LLM model to use")
+    parser = argparse.ArgumentParser(prog="zettabrain-chat")
+    parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--debug",   action="store_true")
     args, _ = parser.parse_known_args()
 
     cmd = [_find_python(), str(script)]
@@ -198,87 +170,113 @@ def chat_cmd():
 
 
 # -------------------------------------------------------
+# zettabrain-server  (HTTPS GUI)
+# -------------------------------------------------------
+def server_cmd():
+    import importlib.util
+    _deploy_scripts()
+    _banner()
+
+    if importlib.util.find_spec("uvicorn") is None:
+        print("ERROR: uvicorn not installed.")
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(prog="zettabrain-server",
+                                     description="Launch the ZettaBrain HTTPS web GUI")
+    parser.add_argument("--host",   default="0.0.0.0",  help="Bind host (default: 0.0.0.0)")
+    parser.add_argument("--port",   default=7860, type=int, help="Port (default: 7860)")
+    parser.add_argument("--no-tls", action="store_true",   help="Disable HTTPS (HTTP only)")
+    parser.add_argument("--reload", action="store_true",   help="Dev mode: auto-reload")
+    args, _ = parser.parse_known_args()
+
+    cfg       = _load_config()
+    cert_file = cfg.get("ZETTABRAIN_CERT", str(CERT_DIR / "cert.pem"))
+    key_file  = cfg.get("ZETTABRAIN_KEY",  str(CERT_DIR / "key.pem"))
+    host_ip   = cfg.get("ZETTABRAIN_SERVER_HOST", "localhost")
+
+    use_tls = (not args.no_tls
+               and Path(cert_file).exists()
+               and Path(key_file).exists())
+
+    proto = "https" if use_tls else "http"
+    print(f"  Starting ZettaBrain GUI...")
+    print(f"  Protocol  : {'HTTPS (secure)' if use_tls else 'HTTP (no TLS — run setup first)'}")
+    print(f"  Open in browser:")
+    print(f"    {proto}://{host_ip}:{args.port}")
+    if args.host == "0.0.0.0":
+        print(f"    {proto}://localhost:{args.port}")
+    if use_tls:
+        fingerprint = cfg.get("ZETTABRAIN_TLS_FINGERPRINT", "")
+        print(f"\n  Certificate fingerprint (SHA-256):")
+        print(f"    {fingerprint}")
+        print(f"\n  Note: Accept the browser's self-signed certificate warning")
+        print(f"  by clicking 'Advanced' → 'Proceed to site'")
+    else:
+        print(f"\n  WARNING: TLS not configured. Run 'sudo zettabrain-setup' first.")
+    print(f"\n  Press Ctrl+C to stop.\n")
+
+    import uvicorn
+    uvicorn_kwargs = dict(
+        app="zettabrain_rag.server:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level="warning",
+    )
+    if use_tls:
+        uvicorn_kwargs["ssl_certfile"] = cert_file
+        uvicorn_kwargs["ssl_keyfile"]  = key_file
+
+    uvicorn.run(**uvicorn_kwargs)
+
+
+# -------------------------------------------------------
 # zettabrain-status
 # -------------------------------------------------------
 def status_cmd():
     _deploy_scripts()
     _banner()
 
-    chroma_path = DEPLOY_DIR / "zettabrain_vectorstore"
-    sqlite_db   = chroma_path / "chroma.sqlite3"
-    ingest_log  = DEPLOY_DIR / "ingested_files.json"
-    nfs_config  = DEPLOY_DIR / "nfs_config.env"
+    cfg = _load_config()
 
     print(f"Version      : {__version__}")
     print(f"Package dir  : {PKG_DIR}")
     print(f"Scripts dir  : {DEPLOY_DIR}")
-    print(f"NFS script   : {NFS_SCRIPT} ({'found' if NFS_SCRIPT.exists() else 'MISSING'})")
+    print(f"Setup script : {SETUP_SCRIPT} ({'found' if SETUP_SCRIPT.exists() else 'MISSING'})")
     print()
 
     print("Deployed scripts:")
     for name in DEPLOY_SCRIPTS:
-        path   = DEPLOY_DIR / name
-        status = "found" if path.exists() else "MISSING"
+        status = "found" if (DEPLOY_DIR / name).exists() else "MISSING"
         print(f"  {name:<35} {status}")
     print()
 
-    if nfs_config.exists():
-        print("NFS Config:")
-        for line in nfs_config.read_text().splitlines():
-            if line and not line.startswith("#"):
-                print(f"  {line}")
+    if cfg:
+        print("Configuration:")
+        for k, v in cfg.items():
+            if "PASSWORD" not in k and "KEY" not in k:
+                print(f"  {k} = {v}")
         print()
 
-    if sqlite_db.exists():
-        size_mb = sqlite_db.stat().st_size / (1024 * 1024)
-        print(f"Vector store : {chroma_path}")
-        print(f"Database     : {size_mb:.1f} MB")
+    cert = Path(cfg.get("ZETTABRAIN_CERT", str(CERT_DIR / "cert.pem")))
+    print(f"TLS Certificate : {cert} ({'found' if cert.exists() else 'MISSING — run sudo zettabrain-setup'})")
+    if cert.exists():
+        fp = cfg.get("ZETTABRAIN_TLS_FINGERPRINT", "")
+        print(f"Fingerprint     : {fp}")
+    print()
+
+    chroma   = DEPLOY_DIR / "zettabrain_vectorstore"
+    sqlite   = chroma / "chroma.sqlite3"
+    ingest   = DEPLOY_DIR / "ingested_files.json"
+    if sqlite.exists():
+        size = sqlite.stat().st_size / (1024 * 1024)
+        print(f"Vector store : {chroma} ({size:.1f} MB)")
         import json
-        if ingest_log.exists():
-            data = json.loads(ingest_log.read_text())
+        if ingest.exists():
+            data = json.loads(ingest.read_text())
             print(f"Tracked files: {len(data)}")
             for fp in sorted(data):
                 print(f"  - {Path(fp).name}")
     else:
-        print("Vector store : not built yet")
-        print("Run: sudo zettabrain-setup")
+        print("Vector store : not built — run: sudo zettabrain-setup")
     print()
-
-
-# -------------------------------------------------------
-# zettabrain-server  (GUI web server)
-# -------------------------------------------------------
-def server_cmd():
-    """Launch the ZettaBrain web GUI."""
-    import importlib.util
-
-    _deploy_scripts()
-    _banner()
-
-    # Check uvicorn is available
-    if importlib.util.find_spec("uvicorn") is None:
-        print("ERROR: uvicorn not installed.")
-        print("Run: pip install 'zettabrain-rag[server]'")
-        sys.exit(1)
-
-    parser = argparse.ArgumentParser(
-        prog="zettabrain-server",
-        description="Launch the ZettaBrain web GUI"
-    )
-    parser.add_argument("--host", default="0.0.0.0",  help="Host to bind (default: 0.0.0.0)")
-    parser.add_argument("--port", default=7860, type=int, help="Port to listen on (default: 7860)")
-    parser.add_argument("--reload", action="store_true", help="Auto-reload on code changes (dev mode)")
-    args, _ = parser.parse_known_args()
-
-    print(f"Starting ZettaBrain GUI...")
-    print(f"Open in browser: http://localhost:{args.port}")
-    print(f"Press Ctrl+C to stop.\n")
-
-    import uvicorn
-    uvicorn.run(
-        "zettabrain_rag.server:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        log_level="warning",  # suppress noise
-    )

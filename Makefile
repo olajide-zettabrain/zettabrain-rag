@@ -9,10 +9,10 @@ VERSION := $(shell grep '^version' pyproject.toml | cut -d'"' -f2)
 
 .PHONY: build publish bump clean sync
 
-# Sync nfs_setup.sh from scripts/ to root (single source of truth)
+# Sync setup.sh from scripts/ to root (single source of truth)
 sync:
-	@echo "Syncing nfs_setup.sh from scripts/ to root..."
-	cp zettabrain_rag/scripts/nfs_setup.sh nfs_setup.sh
+	@echo "Syncing setup.sh from scripts/ to root..."
+	cp zettabrain_rag/scripts/setup.sh setup.sh
 	@echo "Done."
 
 # Build the package (always sync first)
