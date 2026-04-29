@@ -21,13 +21,14 @@ from pydantic import BaseModel
 # -------------------------------------------------------
 # Paths
 # -------------------------------------------------------
-PKG_DIR     = Path(__file__).parent
-STATIC_DIR  = PKG_DIR / "static"
-DEPLOY_DIR  = Path("/opt/zettabrain/src")
-CERT_DIR    = Path("/opt/zettabrain/certs")
-CHROMA_PATH = DEPLOY_DIR / "zettabrain_vectorstore"
-INGEST_LOG  = DEPLOY_DIR / "ingested_files.json"
-CONFIG_FILE = DEPLOY_DIR / "zettabrain.env"
+PKG_DIR      = Path(__file__).parent
+STATIC_DIR   = PKG_DIR / "static"
+DEPLOY_DIR   = Path("/opt/zettabrain/src")
+CERT_DIR     = Path("/opt/zettabrain/certs")
+CHROMA_PATH  = DEPLOY_DIR / "zettabrain_vectorstore"
+INGEST_LOG   = DEPLOY_DIR / "ingested_files.json"
+CONFIG_FILE  = DEPLOY_DIR / "zettabrain.env"
+STORAGE_CONF = DEPLOY_DIR / "storage.conf"
 
 # -------------------------------------------------------
 # Load config from zettabrain.env
@@ -142,6 +143,40 @@ def _get_tls_info() -> dict:
         "fingerprint": FINGERPRINT,
     }
 
+def _get_storage_sources() -> list[dict]:
+    """Return all configured storage sources from storage.conf."""
+    sources = []
+    if STORAGE_CONF.exists():
+        for line in STORAGE_CONF.read_text().splitlines():
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.split("|")
+            if len(parts) >= 4:
+                sources.append({
+                    "role":  parts[0].strip(),
+                    "type":  parts[1].strip(),
+                    "label": parts[2].strip(),
+                    "path":  parts[3].strip(),
+                })
+    # Fall back to primary DOCS_FOLDER if no conf file
+    if not sources:
+        sources.append({"role": "primary", "type": STORAGE_TYPE,
+                        "label": DOCS_FOLDER, "path": DOCS_FOLDER})
+    return sources
+
+def _count_docs_all_sources() -> int:
+    """Count supported documents across every configured storage path."""
+    total = 0
+    seen  = set()
+    for src in _get_storage_sources():
+        p = Path(src["path"])
+        if p in seen or not p.exists():
+            continue
+        seen.add(p)
+        for ext in ["*.pdf", "*.txt", "*.docx", "*.md"]:
+            total += len(list(p.rglob(ext)))
+    return total
+
 
 # -------------------------------------------------------
 # Routes
@@ -156,14 +191,11 @@ async def root():
 
 @app.get("/api/status")
 async def status():
-    chunks  = _get_chunk_count()
-    sources = _get_sources()
-    models  = _get_ollama_models()
-    doc_count = 0
-    docs_path = Path(DOCS_FOLDER)
-    if docs_path.exists():
-        for ext in ["*.pdf", "*.txt", "*.docx", "*.md"]:
-            doc_count += len(list(docs_path.rglob(ext)))
+    chunks          = _get_chunk_count()
+    ingested        = _get_sources()
+    models          = _get_ollama_models()
+    storage_sources = _get_storage_sources()
+    doc_count       = _count_docs_all_sources()
 
     return {
         "ollama": {
@@ -179,13 +211,14 @@ async def status():
             "path":   str(CHROMA_PATH),
         },
         "storage": {
-            "type":       STORAGE_TYPE,
-            "path":       DOCS_FOLDER,
-            "doc_count":  doc_count,
-            "configured": Path(DOCS_FOLDER).exists(),
+            "type":        STORAGE_TYPE,
+            "path":        DOCS_FOLDER,
+            "doc_count":   doc_count,
+            "configured":  any(Path(s["path"]).exists() for s in storage_sources),
+            "sources":     storage_sources,
         },
         "tls":     _get_tls_info(),
-        "sources": sources,
+        "sources": ingested,
     }
 
 
