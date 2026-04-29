@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zettabrain-rag"
-version = "0.2.0"
+version = "0.2.2"
 description = "Local private RAG pipeline with GUI — LangChain + Ollama + ChromaDB + NFS"
 readme = "README.md"
 license = { text = "MIT" }
@@ -56,7 +56,8 @@ zettabrain        = "zettabrain_rag.cli:main"
 zettabrain-chat   = "zettabrain_rag.cli:chat_cmd"
 zettabrain-ingest = "zettabrain_rag.cli:ingest_cmd"
 zettabrain-setup  = "zettabrain_rag.cli:setup_cmd"
-zettabrain-status = "zettabrain_rag.cli:status_cmd"
+zettabrain-status  = "zettabrain_rag.cli:status_cmd"
+zettabrain-storage = "zettabrain_rag.cli:storage_cmd"
 zettabrain-server = "zettabrain_rag.cli:server_cmd"
 
 [project.urls]
@@ -71,6 +72,7 @@ include = ["zettabrain_rag*"]
 [tool.setuptools.package-data]
 "zettabrain_rag" = [
   "scripts/*.sh",
+  "scripts/*.conf",
   "scripts/*.py",
   "scripts/*",
   "static/*.html",

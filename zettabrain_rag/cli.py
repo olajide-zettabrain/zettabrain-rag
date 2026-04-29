@@ -13,7 +13,8 @@ from . import __version__
 
 PKG_DIR     = Path(__file__).parent
 SCRIPTS_DIR = PKG_DIR / "scripts"
-SETUP_SCRIPT = SCRIPTS_DIR / "setup.sh"          # new unified setup script
+SETUP_SCRIPT       = SCRIPTS_DIR / "setup.sh"
+STORAGE_ADD_SCRIPT = SCRIPTS_DIR / "storage_add.sh"
 DEPLOY_DIR  = Path("/opt/zettabrain/src")
 CERT_DIR    = Path("/opt/zettabrain/certs")
 CONFIG_FILE = DEPLOY_DIR / "zettabrain.env"
@@ -229,6 +230,56 @@ def server_cmd():
 
     uvicorn.run(**uvicorn_kwargs)
 
+
+
+
+# -------------------------------------------------------
+# zettabrain-storage
+# -------------------------------------------------------
+def storage_cmd():
+    """Manage storage sources — add new ones after initial setup."""
+    _deploy_scripts()
+    _banner()
+
+    parser = argparse.ArgumentParser(prog="zettabrain-storage")
+    parser.add_argument("action", choices=["add", "list"], help="add: add new storage | list: show current sources")
+    args, _ = parser.parse_known_args()
+
+    if args.action == "list":
+        storage_conf = DEPLOY_DIR / "storage.conf"
+        if not storage_conf.exists():
+            print("No storage sources configured. Run: sudo zettabrain-setup")
+            return
+        print("\nConfigured storage sources:\n")
+        for line in storage_conf.read_text().splitlines():
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.split("|")
+            if len(parts) >= 4:
+                role, stype, label, path = parts[0], parts[1], parts[2], parts[3]
+                print(f"  [{role.upper()}] {stype.upper()} → {path}")
+                print(f"          label: {label}")
+        print()
+
+    elif args.action == "add":
+        script = STORAGE_ADD_SCRIPT
+        if not script.exists():
+            # Try to find it in the package
+            bundled = SCRIPTS_DIR / "storage_add.sh"
+            if bundled.exists():
+                script = bundled
+            else:
+                print(f"ERROR: storage_add.sh not found at {script}")
+                sys.exit(1)
+
+        if os.geteuid() != 0:
+            print("ERROR: Adding storage requires root privileges.")
+            print("Run:   sudo zettabrain-storage add\n")
+            sys.exit(1)
+
+        script.chmod(0o755)
+        result = subprocess.run(["bash", str(script)])
+        sys.exit(result.returncode)
 
 # -------------------------------------------------------
 # zettabrain-status

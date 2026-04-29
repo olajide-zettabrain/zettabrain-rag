@@ -98,8 +98,13 @@ def _get_python() -> str:
     return sys.executable
 
 def _ollama_running() -> bool:
+    """Check Ollama is reachable — always use http:// internally."""
+    _url = OLLAMA_URL.replace("https://", "http://")  # Ollama API is never TLS
     try:
-        return requests.get(OLLAMA_URL, timeout=3).status_code == 200
+        r = requests.get(_url, timeout=5)
+        return r.status_code == 200
+    except requests.exceptions.ConnectionError:
+        return False
     except Exception:
         return False
 
