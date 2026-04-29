@@ -73,10 +73,41 @@ def save_hash_cache(cache: dict):
         json.dump(cache, f, indent=2)
 
 
+def _load_pdf(filepath: str):
+    """Try PyMuPDF first (better layout handling), fall back to pypdf."""
+    try:
+        import fitz  # pymupdf
+        docs = []
+        pdf = fitz.open(filepath)
+        for page_num, page in enumerate(pdf):
+            text = page.get_text("text").strip()
+            if text:
+                from langchain_core.documents import Document
+                docs.append(Document(
+                    page_content=text,
+                    metadata={"source": filepath, "page": page_num}
+                ))
+        pdf.close()
+        if docs:
+            return docs
+        # PyMuPDF found no text — fall through to pypdf
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Fallback: pypdf
+    try:
+        return PyPDFLoader(filepath).load()
+    except Exception as e:
+        print(f"  [WARN] Could not parse PDF {Path(filepath).name}: {e}")
+        return []
+
+
 def load_file(filepath: str):
     ext = Path(filepath).suffix.lower()
     if ext == ".pdf":
-        return PyPDFLoader(filepath).load()
+        return _load_pdf(filepath)
     elif ext in {".txt", ".md"}:
         return TextLoader(filepath, encoding="utf-8").load()
     elif ext in {".docx", ".doc"}:
