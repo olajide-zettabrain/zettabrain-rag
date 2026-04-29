@@ -35,8 +35,8 @@ def _deploy_scripts():
     for name in DEPLOY_SCRIPTS:
         src  = SCRIPTS_DIR / name
         dest = DEPLOY_DIR  / name
-        if src.exists() and not dest.exists():
-            shutil.copy2(src, dest)
+        if src.exists():
+            shutil.copy2(src, dest)  # always overwrite so upgrades take effect
             dest.chmod(0o755)
 
 

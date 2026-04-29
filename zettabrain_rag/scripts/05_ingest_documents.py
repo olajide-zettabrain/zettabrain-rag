@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
@@ -83,6 +84,9 @@ def load_file(filepath: str):
     return []
 
 
+BATCH_SIZE = 50  # chunks per embedding call
+
+
 def ingest_file(filepath: str, vectorstore, hash_cache: dict) -> bool:
     """Ingest a single file. Returns True if ingested, False if skipped."""
     filepath = str(Path(filepath).resolve())
@@ -104,13 +108,34 @@ def ingest_file(filepath: str, vectorstore, hash_cache: dict) -> bool:
     )
     chunks = splitter.split_documents(docs)
 
+    # Drop empty chunks that would cause ChromaDB to reject the batch
+    chunks = [c for c in chunks if c.page_content.strip()]
+
     for chunk in chunks:
         chunk.metadata["source"]   = filepath
         chunk.metadata["filename"] = Path(filepath).name
 
-    vectorstore.add_documents(chunks)
+    # Embed in small batches with retry so one Ollama hiccup doesn't abort the file
+    added = 0
+    for i in range(0, len(chunks), BATCH_SIZE):
+        batch = chunks[i : i + BATCH_SIZE]
+        for attempt in range(3):
+            try:
+                vectorstore.add_documents(batch)
+                added += len(batch)
+                break
+            except Exception as e:
+                if attempt == 2:
+                    print(f"  [WARN] {Path(filepath).name} batch {i//BATCH_SIZE + 1} failed: {e}")
+                else:
+                    time.sleep(2 ** attempt)
+
+    if added == 0:
+        print(f"  [FAIL] {Path(filepath).name} — no chunks embedded, skipping hash save")
+        return False
+
     hash_cache[filepath] = file_hash
-    print(f"  [OK]   {Path(filepath).name} ({len(chunks)} chunks)")
+    print(f"  [OK]   {Path(filepath).name} ({added}/{len(chunks)} chunks)")
     return True
 
 
