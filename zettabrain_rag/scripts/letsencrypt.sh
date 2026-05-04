@@ -15,6 +15,28 @@ SECRETS_DIR="/root/.secrets"
 
 [ "$(id -u)" = "0" ] || error "Run as root: sudo zettabrain-cert"
 
+# ── Locate certbot ─────────────────────────────────────────────────────────
+# When installed via pipx, certbot lives in the package venv — not system PATH.
+# cli.py sets CERTBOT_BIN to the venv binary; fall back to PATH, then venv scan.
+if [ -n "${CERTBOT_BIN:-}" ] && [ -x "$CERTBOT_BIN" ]; then
+  CERTBOT="$CERTBOT_BIN"
+elif command -v certbot &>/dev/null; then
+  CERTBOT="certbot"
+else
+  CERTBOT=""
+  for _venv in \
+    /root/.local/share/pipx/venvs/zettabrain-rag \
+    /home/*/.local/share/pipx/venvs/zettabrain-rag; do
+    _cb="${_venv}/bin/certbot"
+    if [ -f "$_cb" ]; then
+      CERTBOT="$_cb"
+      break
+    fi
+  done
+  [ -n "$CERTBOT" ] || error "certbot not found. Try: pipx reinstall zettabrain-rag"
+fi
+ok "Using certbot: ${CERTBOT}"
+
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║   ZettaBrain — Let's Encrypt Certificate Setup      ║"
@@ -97,7 +119,7 @@ esac
 
 # ── Issue certificate ──────────────────────────────────────────────────────
 step "Requesting wildcard certificate for ${WILDCARD} and ${DOMAIN}"
-certbot "${CERTBOT_ARGS[@]}"
+"$CERTBOT" "${CERTBOT_ARGS[@]}"
 
 # ── Verify ────────────────────────────────────────────────────────────────
 CERT_PATH="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
@@ -148,10 +170,10 @@ ok "Renewal hook installed: ${HOOK_DIR}/zettabrain.sh"
 
 # ── Dry-run renewal test ───────────────────────────────────────────────────
 step "Testing auto-renewal (dry run)"
-if certbot renew --dry-run --quiet 2>&1; then
+if "$CERTBOT" renew --dry-run --quiet 2>&1; then
   ok "Auto-renewal working correctly"
 else
-  warn "Dry-run renewal failed — check: certbot renew --dry-run"
+  warn "Dry-run renewal failed — check: $CERTBOT renew --dry-run"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────

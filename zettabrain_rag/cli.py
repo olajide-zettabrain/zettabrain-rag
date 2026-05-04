@@ -118,7 +118,7 @@ def setup_cmd():
         sys.exit(1)
 
     SETUP_SCRIPT.chmod(0o755)
-    result = subprocess.run(["bash", str(SETUP_SCRIPT)])
+    result = subprocess.run(["bash", str(SETUP_SCRIPT)], env=_certbot_env())
     sys.exit(result.returncode)
 
 
@@ -241,6 +241,15 @@ def server_cmd():
 # -------------------------------------------------------
 # zettabrain-cert
 # -------------------------------------------------------
+def _certbot_env() -> dict:
+    """Return env dict with CERTBOT_BIN pointing to the venv's certbot binary."""
+    env = os.environ.copy()
+    certbot_path = Path(sys.executable).parent / "certbot"
+    if certbot_path.exists():
+        env["CERTBOT_BIN"] = str(certbot_path)
+    return env
+
+
 def cert_cmd():
     """Obtain a Let's Encrypt wildcard certificate via DNS-01 challenge."""
     _deploy_scripts()
@@ -253,7 +262,7 @@ def cert_cmd():
 
     _require(LETSENCRYPT_SCRIPT)
     LETSENCRYPT_SCRIPT.chmod(0o755)
-    result = subprocess.run(["bash", str(LETSENCRYPT_SCRIPT)])
+    result = subprocess.run(["bash", str(LETSENCRYPT_SCRIPT)], env=_certbot_env())
     sys.exit(result.returncode)
 
 
