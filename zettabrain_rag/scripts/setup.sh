@@ -572,7 +572,37 @@ if [ -n "$TUNNEL_TOKEN" ]; then
     step "Installing Cloudflare Tunnel as a system service"
     # Remove any previous service first (idempotent reinstall)
     "$CLOUDFLARED_BIN" service uninstall 2>/dev/null || true
+    systemctl stop cloudflared 2>/dev/null || true
+
+    _CF_INSTALLED=false
     if "$CLOUDFLARED_BIN" service install "$TUNNEL_TOKEN" >> "$LOG_FILE" 2>&1; then
+      _CF_INSTALLED=true
+    else
+      # Fallback: write systemd unit manually (works when cloudflared service install fails)
+      info "Falling back to manual systemd unit..."
+      cat > /etc/systemd/system/cloudflared.service << CFEOF
+[Unit]
+Description=Cloudflare Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=${CLOUDFLARED_BIN} tunnel run --token ${TUNNEL_TOKEN}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+CFEOF
+      _CF_INSTALLED=true
+    fi
+
+    if [ "$_CF_INSTALLED" = "true" ]; then
+      systemctl daemon-reload >> "$LOG_FILE" 2>&1 || true
       systemctl enable cloudflared >> "$LOG_FILE" 2>&1 || true
       systemctl restart cloudflared >> "$LOG_FILE" 2>&1 || true
       sleep 3
@@ -580,10 +610,10 @@ if [ -n "$TUNNEL_TOKEN" ]; then
         success "Cloudflare Tunnel is running"
         TUNNEL_ENABLED=true
       else
-        warn "Tunnel service not active — check: systemctl status cloudflared"
+        warn "Tunnel installed but not yet active."
+        warn "Check: sudo systemctl status cloudflared"
+        warn "Logs : sudo journalctl -u cloudflared -n 30"
       fi
-    else
-      warn "Service install failed — try: cloudflared service install <token>"
     fi
   else
     warn "cloudflared binary not found — tunnel not configured"
