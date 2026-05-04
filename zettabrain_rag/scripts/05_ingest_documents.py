@@ -24,6 +24,12 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 
+try:
+    from zettabrain_rag.retrieval import rebuild_bm25_index
+    _HAS_RETRIEVAL = True
+except ImportError:
+    _HAS_RETRIEVAL = False
+
 # -------------------------------------------------------
 # CONFIGURATION
 # -------------------------------------------------------
@@ -118,6 +124,30 @@ def load_file(filepath: str):
 BATCH_SIZE = 50  # chunks per embedding call
 
 
+def _adaptive_splitter(filepath: str, docs) -> RecursiveCharacterTextSplitter:
+    """Tune chunk size by file type and text density."""
+    ext = Path(filepath).suffix.lower()
+    if ext == ".pdf":
+        size, overlap = 1000, 150
+    elif ext in {".docx", ".doc"}:
+        size, overlap = 1200, 200
+    else:  # .txt, .md
+        size, overlap = 800, 100
+
+    # Dense technical text (long sentences) → scale up
+    sample = " ".join(d.page_content for d in docs[:5])
+    sentences = [s.strip() for s in sample.replace("\n", " ").split(".") if s.strip()]
+    if sentences and sum(len(s) for s in sentences) / len(sentences) > 120:
+        size    = int(size    * 1.5)
+        overlap = int(overlap * 1.5)
+
+    return RecursiveCharacterTextSplitter(
+        chunk_size=size,
+        chunk_overlap=overlap,
+        separators=["\n\n\n", "\n\n", "\n", ". ", " ", ""]
+    )
+
+
 def ingest_file(filepath: str, vectorstore, hash_cache: dict) -> bool:
     """Ingest a single file. Returns True if ingested, False if skipped."""
     filepath = str(Path(filepath).resolve())
@@ -132,11 +162,7 @@ def ingest_file(filepath: str, vectorstore, hash_cache: dict) -> bool:
         print(f"  [SKIP] {Path(filepath).name} (unsupported or empty)")
         return False
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500,
-        chunk_overlap=200,
-        separators=["\n\n\n", "\n\n", "\n", ". ", " ", ""]
-    )
+    splitter = _adaptive_splitter(filepath, docs)
     chunks = splitter.split_documents(docs)
 
     # Drop empty chunks that would cause ChromaDB to reject the batch
@@ -238,6 +264,11 @@ def main():
     save_hash_cache(hash_cache)
     print(f"\nDone. {ingested} new file(s) ingested.")
     print(f"Total chunks in store: {vectorstore._collection.count()}")
+
+    if ingested > 0 and _HAS_RETRIEVAL:
+        print("Rebuilding BM25 keyword index...")
+        n = rebuild_bm25_index(vectorstore)
+        print(f"BM25 index: {n} chunks indexed.")
 
 
 if __name__ == "__main__":

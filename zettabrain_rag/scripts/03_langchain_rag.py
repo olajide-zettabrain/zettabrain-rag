@@ -23,8 +23,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
+
+from zettabrain_rag.retrieval import hybrid_retrieve, RAG_PROMPT, format_context
 
 # -------------------------------------------------------
 # CONFIGURATION
@@ -155,71 +155,22 @@ def get_vectorstore(chunks=None, force_rebuild=False):
 
 
 # -------------------------------------------------------
-# 4. BUILD RAG CHAIN
+# 4. BUILD LLM
 # -------------------------------------------------------
-def build_rag_chain(vectorstore):
-    llm = OllamaLLM(
-        model=LLM_MODEL,
-        temperature=0.0,
-        num_predict=1024
-    )
-
-    # MMR = Maximum Marginal Relevance
-    # Returns diverse chunks instead of 6 near-identical ones
-    retriever = vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs={
-            "k": 6,
-            "fetch_k": 20,
-            "lambda_mult": 0.7
-        }
-    )
-
-    prompt_template = PromptTemplate.from_template("""You are ZettaBrain, an intelligent assistant that answers questions based on a knowledge base of documents.
-
-INSTRUCTIONS:
-- Read the context carefully and answer the question using information found in it.
-- Be specific and detailed in your answer.
-- If the context contains partial information, use what is available and say so.
-- Only say the topic is not covered if the context is completely unrelated to the question.
-- Always answer in clear, plain English.
-
-CONTEXT FROM YOUR DOCUMENTS:
-{context}
-
-QUESTION: {question}
-
-ANSWER:""")
-
-    def format_docs(docs):
-        formatted = []
-        for doc in docs:
-            source = Path(doc.metadata.get("source", "unknown")).name
-            formatted.append(f"[Source: {source}]\n{doc.page_content}")
-        return "\n\n---\n\n".join(formatted)
-
-    chain = (
-        {
-            "context":  retriever | format_docs,
-            "question": RunnablePassthrough()
-        }
-        | prompt_template
-        | llm
-        | StrOutputParser()
-    )
-
-    return chain, retriever
+def build_llm():
+    return OllamaLLM(model=LLM_MODEL, temperature=0.0, num_predict=1024)
 
 
 # -------------------------------------------------------
 # 5. INTERACTIVE CHAT
 # -------------------------------------------------------
-def chat(chain, retriever):
+def chat(llm, vectorstore):
     print("\n" + "="*60)
     print("ZettaBrain Local RAG v2")
     print("Commands: 'sources' | 'debug on/off' | 'quit'")
     print("="*60 + "\n")
 
+    prompt = PromptTemplate.from_template(RAG_PROMPT)
     last_sources = []
     debug = DEBUG
 
@@ -263,7 +214,7 @@ def chat(chain, retriever):
 
         print("Thinking...\n")
 
-        last_sources = retriever.invoke(query)
+        last_sources = hybrid_retrieve(query, vectorstore)
 
         if debug:
             print(f"[DEBUG] {len(last_sources)} chunks retrieved:")
@@ -272,7 +223,8 @@ def chat(chain, retriever):
                 print(f"  [{i}] {src}: {doc.page_content[:150]}")
             print()
 
-        answer = chain.invoke(query)
+        context = format_context(last_sources)
+        answer  = llm.invoke(prompt.format(context=context, question=query))
         print(f"Assistant: {answer}\n")
         print(f"[{len(last_sources)} chunks used — type 'sources' for details]\n")
 
@@ -312,7 +264,7 @@ if __name__ == "__main__":
         print("\n[2/4] No documents found — loading existing vector store...")
         vectorstore = get_vectorstore()
 
-    print("\n[4/4] Building RAG chain...")
-    chain, retriever = build_rag_chain(vectorstore)
+    print("\n[4/4] Building LLM...")
+    llm = build_llm()
 
-    chat(chain, retriever)
+    chat(llm, vectorstore)

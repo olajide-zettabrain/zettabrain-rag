@@ -18,6 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from .retrieval import hybrid_retrieve, RAG_PROMPT, format_context
+
 # -------------------------------------------------------
 # Paths
 # -------------------------------------------------------
@@ -270,40 +272,27 @@ async def chat(req: ChatRequest):
         from langchain_ollama import OllamaEmbeddings, OllamaLLM
         from langchain_chroma import Chroma
         from langchain_core.prompts import PromptTemplate
-        from langchain_core.runnables import RunnablePassthrough
         from langchain_core.output_parsers import StrOutputParser
 
         embeddings  = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
         vectorstore = Chroma(persist_directory=str(CHROMA_PATH),
                              embedding_function=embeddings,
                              collection_name="zettabrain_docs")
-        retriever   = vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 6, "fetch_k": 20, "lambda_mult": 0.7}
-        )
-        prompt = PromptTemplate.from_template(
-            "You are ZettaBrain. Answer using the context below.\n\n"
-            "CONTEXT:\n{context}\n\nQUESTION: {question}\n\nANSWER:"
-        )
-        def format_docs(docs):
-            return "\n\n---\n\n".join(
-                f"[Source: {Path(d.metadata.get('source','?')).name}]\n{d.page_content}"
-                for d in docs
-            )
-
-        llm    = OllamaLLM(model=model, base_url=OLLAMA_URL, temperature=0.0, num_predict=1024)
-        sources = retriever.invoke(req.question)
-        chain   = ({"context": retriever | format_docs, "question": RunnablePassthrough()}
-                   | prompt | llm | StrOutputParser())
-        answer  = chain.invoke(req.question)
+        sources  = hybrid_retrieve(req.question, vectorstore)
+        context  = format_context(sources)
+        prompt   = PromptTemplate.from_template(RAG_PROMPT)
+        llm      = OllamaLLM(model=model, base_url=OLLAMA_URL, temperature=0.0, num_predict=1024)
+        answer   = (prompt | llm | StrOutputParser()).invoke(
+                       {"context": context, "question": req.question}
+                   )
 
         return {
-            "answer":         answer,
-            "model":          model,
+            "answer":          answer,
+            "model":           model,
             "chunks_searched": len(sources),
             "sources": [
-                {"filename": Path(s.metadata.get("source","?")).name,
-                 "page":     s.metadata.get("page",""),
+                {"filename": Path(s.metadata.get("source", "?")).name,
+                 "page":     s.metadata.get("page", ""),
                  "preview":  s.page_content[:200]}
                 for s in sources
             ],
@@ -340,29 +329,18 @@ async def websocket_chat(websocket: WebSocket):
                 vectorstore = Chroma(persist_directory=str(CHROMA_PATH),
                                      embedding_function=embeddings,
                                      collection_name="zettabrain_docs")
-                retriever   = vectorstore.as_retriever(
-                    search_type="mmr",
-                    search_kwargs={"k": 6, "fetch_k": 20, "lambda_mult": 0.7}
-                )
 
-                sources     = retriever.invoke(question)
+                sources     = hybrid_retrieve(question, vectorstore)
                 source_list = [
-                    {"filename": Path(s.metadata.get("source","?")).name,
-                     "page":     s.metadata.get("page",""),
+                    {"filename": Path(s.metadata.get("source", "?")).name,
+                     "page":     s.metadata.get("page", ""),
                      "preview":  s.page_content[:200]}
                     for s in sources
                 ]
                 await websocket.send_json({"type": "sources", "sources": source_list})
 
-                context     = "\n\n---\n\n".join(
-                    f"[Source: {Path(s.metadata.get('source','?')).name}]\n{s.page_content}"
-                    for s in sources
-                )
-                prompt_text = (
-                    "You are ZettaBrain. Answer using the context below.\n\n"
-                    f"CONTEXT:\n{context}\n\n"
-                    f"QUESTION: {question}\n\nANSWER:"
-                )
+                context     = format_context(sources)
+                prompt_text = RAG_PROMPT.format(context=context, question=question)
 
                 import asyncio
 
