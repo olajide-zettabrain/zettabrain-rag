@@ -474,106 +474,9 @@ else
   fi
 fi
 
-# ================================================================
-# STEP 4/5 — GENERATE TLS CERTIFICATE
-# ================================================================
-step "Step 4/5: Generating TLS certificate"
-
-# Install openssl if needed
-if ! command -v openssl &>/dev/null; then
-  info "Installing openssl..."
-  if command -v apt-get &>/dev/null; then
-    apt-get install -y -qq openssl 2>/dev/null
-  elif command -v yum &>/dev/null; then
-    yum install -y -q openssl 2>/dev/null
-  elif command -v dnf &>/dev/null; then
-    dnf install -y -q openssl 2>/dev/null
-  fi
-fi
-
-CERT_FILE="${CERT_DIR}/cert.pem"
-KEY_FILE="${CERT_DIR}/key.pem"
-CERT_CONF="${CERT_DIR}/openssl.cnf"
-
-# Detect this server's IPs and hostname
-SERVER_HOST=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "localhost")
 PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
-ALL_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.' || echo "127.0.0.1")
-
-info "Certificate will cover:"
-info "  Hostname : ${SERVER_HOST}"
-info "  IPs      : $(echo $ALL_IPS | tr '\n' ' ')"
-
-# Build Subject Alternative Names list
-SAN_LIST="DNS:localhost,DNS:${SERVER_HOST},IP:127.0.0.1"
-while IFS= read -r _ip; do
-  [ -n "$_ip" ] && [ "$_ip" != "127.0.0.1" ] && SAN_LIST="${SAN_LIST},IP:${_ip}"
-done <<< "$ALL_IPS"
-
-# Optionally add extra IPs or domains
-echo ""
-read -rp "  Add extra IP/domain to certificate? (blank to skip): " _extra
-if [ -n "$_extra" ]; then
-  if [[ $_extra =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    SAN_LIST="${SAN_LIST},IP:${_extra}"
-  else
-    SAN_LIST="${SAN_LIST},DNS:${_extra}"
-  fi
-  info "Added to certificate SAN: ${_extra}"
-fi
-
-# Write OpenSSL config
-cat > "$CERT_CONF" << SSLEOF
-[req]
-default_bits       = 2048
-prompt             = no
-default_md         = sha256
-distinguished_name = dn
-x509_extensions    = v3_req
-
-[dn]
-C  = US
-ST = ZettaBrain
-L  = Local
-O  = ZettaBrain RAG
-OU = Self-Signed
-CN = ${SERVER_HOST}
-
-[v3_req]
-subjectAltName   = ${SAN_LIST}
-keyUsage         = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
-basicConstraints = critical, CA:false
-SSLEOF
-
-# Generate certificate — remove old one if exists
-rm -f "$CERT_FILE" "$KEY_FILE"
-
-if openssl req -x509 -nodes \
-    -newkey rsa:2048 \
-    -keyout "$KEY_FILE" \
-    -out    "$CERT_FILE" \
-    -days   3650 \
-    -config "$CERT_CONF" \
-    >> "$LOG_FILE" 2>&1; then
-
-  chmod 600 "$KEY_FILE"
-  chmod 644 "$CERT_FILE"
-
-  FINGERPRINT=$(openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256 2>/dev/null \
-                | sed 's/SHA256 Fingerprint=//')
-
-  success "TLS certificate generated (valid 10 years)."
-  info "  Cert : ${CERT_FILE}"
-  info "  Key  : ${KEY_FILE}"
-  info "  SANs : ${SAN_LIST}"
-else
-  warn "TLS certificate generation failed — server will run HTTP only."
-  warn "Check: ${LOG_FILE}"
-  CERT_FILE=""
-  KEY_FILE=""
-  FINGERPRINT=""
-fi
+CERT_FILE=""
+FINGERPRINT=""
 
 # ================================================================
 # SAVE CONFIGURATION
@@ -596,10 +499,6 @@ OLLAMA_HOST="${OLLAMA_URL}"
 ZETTABRAIN_LLM_MODEL="${LLM_MODEL}"
 ZETTABRAIN_EMBED_MODEL="${EMBED_MODEL}"
 
-# --- TLS ---
-ZETTABRAIN_CERT="${CERT_FILE}"
-ZETTABRAIN_KEY="${KEY_FILE}"
-ZETTABRAIN_TLS_FINGERPRINT="${FINGERPRINT}"
 ZETTABRAIN_SERVER_HOST="${PRIMARY_IP}"
 ENVEOF
 
@@ -614,6 +513,23 @@ primary|${STORAGE_TYPE}|${STORAGE_LABEL}|${PRIMARY_PATH}
 STEOF
 
 success "Storage registry saved: ${STORAGE_CONFIG}"
+
+# ================================================================
+# STEP 4/5 — TLS CERTIFICATE (Let's Encrypt)
+# ================================================================
+step "Step 4/5: TLS certificate (Let's Encrypt)"
+
+LETSENCRYPT_SCRIPT="$(dirname "$0")/letsencrypt.sh"
+if [ -f "$LETSENCRYPT_SCRIPT" ]; then
+  bash "$LETSENCRYPT_SCRIPT"
+  CERT_FILE=$(grep "^ZETTABRAIN_CERT=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2 || echo "")
+  FINGERPRINT=$(grep "^ZETTABRAIN_TLS_FINGERPRINT=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2 || echo "")
+else
+  warn "letsencrypt.sh not found — TLS not configured."
+  warn "Run: sudo zettabrain-cert"
+  CERT_FILE=""
+  FINGERPRINT=""
+fi
 
 # ================================================================
 # STEP 5/5 — BUILD RAG VECTOR STORE
@@ -751,15 +667,14 @@ echo ""
 echo -e "${CYAN}─── Access the GUI ──────────────────────────────────────${NC}"
 echo ""
 if [ -n "$CERT_FILE" ]; then
-  echo -e "  Open in browser: ${BOLD}https://${PRIMARY_IP}:7860${NC}"
+  DOMAIN_HOST=$(grep "^ZETTABRAIN_SERVER_HOST=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2 || echo "$PRIMARY_IP")
+  echo -e "  Open in browser: ${BOLD}https://${DOMAIN_HOST}:7860${NC}"
   echo ""
-  echo -e "  ${YELLOW}First visit: browser will warn about self-signed certificate."
-  echo -e "  Click 'Advanced' → 'Proceed to site' to continue.${NC}"
-  echo ""
-  echo -e "  Certificate fingerprint (SHA-256) for verification:"
-  echo -e "  ${CYAN}${FINGERPRINT}${NC}"
+  echo -e "  ${GREEN}Certificate: Let's Encrypt (trusted by all browsers)${NC}"
 else
   echo -e "  Open in browser: ${BOLD}http://${PRIMARY_IP}:7860${NC}"
+  echo ""
+  echo -e "  ${YELLOW}TLS not configured. Run 'sudo zettabrain-cert' to add HTTPS.${NC}"
 fi
 echo ""
 echo -e "${CYAN}─── Useful Commands ─────────────────────────────────────${NC}"

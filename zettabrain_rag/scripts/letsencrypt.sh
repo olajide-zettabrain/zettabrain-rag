@@ -46,10 +46,6 @@ case "$_dns" in
     [ -z "$GODADDY_KEY" ] && error "API Key is required"
     [ -z "$GODADDY_SECRET" ] && error "API Secret is required"
 
-    step "Installing certbot + certbot-dns-godaddy"
-    pip3 install --quiet certbot certbot-dns-godaddy || \
-      pip  install --quiet certbot certbot-dns-godaddy
-
     CREDS_FILE="${SECRETS_DIR}/godaddy.ini"
     mkdir -p "$SECRETS_DIR" && chmod 700 "$SECRETS_DIR"
     printf "dns_godaddy_key    = %s\ndns_godaddy_secret = %s\n" \
@@ -75,10 +71,6 @@ case "$_dns" in
     read -rsp "  API Token: " CF_TOKEN
     echo ""
     [ -z "$CF_TOKEN" ] && error "API Token is required"
-
-    step "Installing certbot + certbot-dns-cloudflare"
-    pip3 install --quiet certbot certbot-dns-cloudflare || \
-      pip  install --quiet certbot certbot-dns-cloudflare
 
     CREDS_FILE="${SECRETS_DIR}/cloudflare.ini"
     mkdir -p "$SECRETS_DIR" && chmod 700 "$SECRETS_DIR"

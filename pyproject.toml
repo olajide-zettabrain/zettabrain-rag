@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zettabrain-rag"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local private RAG pipeline with GUI — LangChain + Ollama + ChromaDB + NFS"
 readme = "README.md"
 license = { text = "MIT" }
@@ -36,6 +36,9 @@ dependencies = [
   "chromadb>=0.5.0",
   "pypdf>=4.0.0",
   "pymupdf>=1.23.0",
+  "certbot>=2.0.0",
+  "certbot-dns-godaddy>=1.0.0",
+  "certbot-dns-cloudflare>=0.0.1",
   "python-docx>=1.1.0",
   "requests>=2.31.0",
   "fastapi>=0.111.0",
