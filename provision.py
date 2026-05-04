@@ -122,17 +122,6 @@ def build_token(account_tag: str, tunnel_id: str, tunnel_secret_b64: str) -> str
     return base64.b64encode(payload.encode()).decode()
 
 
-def get_account_tag() -> str:
-    result = _check(
-        requests.get(
-            f"https://api.cloudflare.com/client/v4/accounts/{CONFIG['CF_ACCOUNT_ID']}",
-            headers=_headers(),
-        ),
-        "get_account",
-    )
-    return result["id"]
-
-
 def cmd_provision(customer_name: str):
     hostname = f"{customer_name}.{CONFIG['DOMAIN']}"
 
@@ -150,8 +139,7 @@ def cmd_provision(customer_name: str):
     create_dns_record(tunnel_id, hostname)
 
     print("  [4/4] Building customer token...")
-    account_tag = get_account_tag()
-    token = build_token(account_tag, tunnel_id, tunnel_secret)
+    token = build_token(CONFIG["CF_ACCOUNT_ID"], tunnel_id, tunnel_secret)
 
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
