@@ -9,7 +9,7 @@
 #   1. Select PRIMARY storage type (Local / NFS / SMB)
 #   2. Configure and mount that storage
 #   3. Install Ollama + pull required AI models
-#   4. Generate TLS certificate bound to this server's IPs
+#   4. Install Cloudflare Tunnel for trusted HTTPS (optional, token required)
 #   5. Build the initial RAG vector store
 #
 # To add MORE storage sources after install:
@@ -475,12 +475,21 @@ else
 fi
 
 PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
-CERT_FILE=""
-FINGERPRINT=""
 
 # ================================================================
 # SAVE CONFIGURATION
 # ================================================================
+
+# Helper: update or append a key=value in the config file
+_upsert() {
+  local key="$1" val="$2"
+  if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "$CONFIG_FILE"
+  else
+    echo "${key}=${val}" >> "$CONFIG_FILE"
+  fi
+}
+
 cat > "$CONFIG_FILE" << ENVEOF
 # ZettaBrain Configuration
 # Generated: $(date '+%Y-%m-%d %H:%M:%S')
@@ -499,7 +508,9 @@ OLLAMA_HOST="${OLLAMA_URL}"
 ZETTABRAIN_LLM_MODEL="${LLM_MODEL}"
 ZETTABRAIN_EMBED_MODEL="${EMBED_MODEL}"
 
+# --- Network ---
 ZETTABRAIN_SERVER_HOST="${PRIMARY_IP}"
+ZETTABRAIN_TUNNEL_ENABLED=false
 ENVEOF
 
 success "Configuration saved: ${CONFIG_FILE}"
@@ -515,20 +526,75 @@ STEOF
 success "Storage registry saved: ${STORAGE_CONFIG}"
 
 # ================================================================
-# STEP 4/5 — TLS CERTIFICATE (Let's Encrypt)
+# STEP 4/5 — SECURE HTTPS VIA CLOUDFLARE TUNNEL
 # ================================================================
-step "Step 4/5: TLS certificate (Let's Encrypt)"
+step "Step 4/5: Secure HTTPS (Cloudflare Tunnel)"
 
-LETSENCRYPT_SCRIPT="$(dirname "$0")/letsencrypt.sh"
-if [ -f "$LETSENCRYPT_SCRIPT" ]; then
-  bash "$LETSENCRYPT_SCRIPT"
-  CERT_FILE=$(grep "^ZETTABRAIN_CERT=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2 || echo "")
-  FINGERPRINT=$(grep "^ZETTABRAIN_TLS_FINGERPRINT=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2 || echo "")
+echo ""
+echo "  Cloudflare Tunnel gives users a trusted HTTPS URL like"
+echo "  https://your-company.zettabrain.io — no cert management needed."
+echo ""
+echo "  To get a token (takes 2 minutes):"
+echo "    1. https://one.dash.cloudflare.com → Zero Trust → Networks → Tunnels"
+echo "    2. Create Tunnel → Docker → copy the token shown"
+echo "    3. Add Public Hostname: <subdomain>.zettabrain.io → http://localhost:7860"
+echo ""
+read -rp "  Paste Cloudflare Tunnel token (Enter to skip): " TUNNEL_TOKEN
+echo ""
+
+TUNNEL_ENABLED=false
+
+if [ -n "$TUNNEL_TOKEN" ]; then
+  # ── Download cloudflared ─────────────────────────────────────────────────
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64)  CF_ARCH="amd64" ;;
+    aarch64) CF_ARCH="arm64" ;;
+    armv7l)  CF_ARCH="arm"   ;;
+    *) warn "Unsupported arch ${ARCH} — install cloudflared manually"; CF_ARCH="" ;;
+  esac
+
+  if [ -n "$CF_ARCH" ] && ! command -v cloudflared &>/dev/null; then
+    info "Downloading cloudflared (${CF_ARCH})..."
+    CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}"
+    if curl -fsSL "$CF_URL" -o /usr/local/bin/cloudflared 2>>"$LOG_FILE"; then
+      chmod +x /usr/local/bin/cloudflared
+      success "cloudflared installed: $(/usr/local/bin/cloudflared --version 2>&1 | head -1)"
+    else
+      warn "cloudflared download failed. Install from:"
+      warn "  https://github.com/cloudflare/cloudflared/releases"
+    fi
+  else
+    [ -n "$CF_ARCH" ] && info "cloudflared already installed: $(cloudflared --version 2>&1 | head -1)"
+  fi
+
+  # ── Install tunnel as a systemd service ──────────────────────────────────
+  CLOUDFLARED_BIN=$(command -v cloudflared 2>/dev/null || echo /usr/local/bin/cloudflared)
+  if [ -x "$CLOUDFLARED_BIN" ]; then
+    step "Installing Cloudflare Tunnel as a system service"
+    # Remove any previous service first (idempotent reinstall)
+    "$CLOUDFLARED_BIN" service uninstall 2>/dev/null || true
+    if "$CLOUDFLARED_BIN" service install "$TUNNEL_TOKEN" >> "$LOG_FILE" 2>&1; then
+      systemctl enable cloudflared >> "$LOG_FILE" 2>&1 || true
+      systemctl restart cloudflared >> "$LOG_FILE" 2>&1 || true
+      sleep 3
+      if systemctl is-active --quiet cloudflared 2>/dev/null; then
+        success "Cloudflare Tunnel is running"
+        TUNNEL_ENABLED=true
+      else
+        warn "Tunnel service not active — check: systemctl status cloudflared"
+      fi
+    else
+      warn "Service install failed — try: cloudflared service install <token>"
+    fi
+  else
+    warn "cloudflared binary not found — tunnel not configured"
+  fi
+
+  # ── Update config ────────────────────────────────────────────────────────
+  _upsert "ZETTABRAIN_TUNNEL_ENABLED" "$TUNNEL_ENABLED"
 else
-  warn "letsencrypt.sh not found — TLS not configured."
-  warn "Run: sudo zettabrain-cert"
-  CERT_FILE=""
-  FINGERPRINT=""
+  info "Skipped. Run 'sudo zettabrain-cert' to add HTTPS later."
 fi
 
 # ================================================================
@@ -615,10 +681,17 @@ step "Installing ZettaBrain as a system service"
 _server_bin=$(command -v zettabrain-server 2>/dev/null \
               || echo "/root/.local/bin/zettabrain-server")
 
+# When behind Cloudflare Tunnel, bind to localhost only (Cloudflare proxies externally)
+if [ "$TUNNEL_ENABLED" = "true" ]; then
+  _server_args="--host 127.0.0.1 --port 7860 --no-tls"
+else
+  _server_args="--host 0.0.0.0 --port 7860 --no-tls"
+fi
+
 cat > /etc/systemd/system/zettabrain.service << SVCEOF
 [Unit]
 Description=ZettaBrain RAG Web Server
-After=network-online.target ollama.service
+After=network-online.target ollama.service cloudflared.service
 Wants=network-online.target
 Requires=ollama.service
 
@@ -626,7 +699,7 @@ Requires=ollama.service
 Type=simple
 User=root
 WorkingDirectory=${DEPLOY_DIR}
-ExecStart=${_server_bin} --port 7860
+ExecStart=${_server_bin} ${_server_args}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -647,7 +720,7 @@ if systemctl is-active --quiet zettabrain 2>/dev/null; then
   success "ZettaBrain web server started and enabled on boot."
 else
   warn "Web server did not start automatically."
-  warn "Start manually: zettabrain-server --port 7860"
+  warn "Start manually: zettabrain-server --no-tls --port 7860"
 fi
 
 # ================================================================
@@ -661,20 +734,28 @@ echo ""
 echo -e "  Storage type : ${GREEN}${STORAGE_TYPE^^}${NC}"
 echo -e "  Docs path    : ${GREEN}${PRIMARY_PATH}${NC}"
 echo -e "  Documents    : ${GREEN}${DOC_COUNT} file(s)${NC}"
-echo -e "  TLS cert     : ${GREEN}${CERT_FILE:-HTTP only (no cert)}${NC}"
+echo -e "  Tunnel       : ${GREEN}${TUNNEL_ENABLED}${NC}"
 echo -e "  Config file  : ${GREEN}${CONFIG_FILE}${NC}"
 echo ""
 echo -e "${CYAN}─── Access the GUI ──────────────────────────────────────${NC}"
 echo ""
-if [ -n "$CERT_FILE" ]; then
-  DOMAIN_HOST=$(grep "^ZETTABRAIN_SERVER_HOST=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2 || echo "$PRIMARY_IP")
-  echo -e "  Open in browser: ${BOLD}https://${DOMAIN_HOST}:7860${NC}"
+if [ "$TUNNEL_ENABLED" = "true" ]; then
+  CF_HOSTNAME=$(cloudflared tunnel info 2>/dev/null | grep -oP 'https://\S+' | head -1 || echo "")
+  echo -e "  ${GREEN}Cloudflare Tunnel is active — fully trusted HTTPS${NC}"
   echo ""
-  echo -e "  ${GREEN}Certificate: Let's Encrypt (trusted by all browsers)${NC}"
+  if [ -n "$CF_HOSTNAME" ]; then
+    echo -e "  Open in browser: ${BOLD}${CF_HOSTNAME}${NC}"
+  else
+    echo -e "  Open in browser: the public hostname you configured in Cloudflare"
+    echo -e "  (e.g. ${BOLD}https://your-subdomain.zettabrain.io${NC})"
+  fi
+  echo ""
+  echo -e "  Local access only: ${BOLD}http://localhost:7860${NC}"
 else
-  echo -e "  Open in browser: ${BOLD}http://${PRIMARY_IP}:7860${NC}"
+  echo -e "  Open in browser (local network): ${BOLD}http://${PRIMARY_IP}:7860${NC}"
   echo ""
-  echo -e "  ${YELLOW}TLS not configured. Run 'sudo zettabrain-cert' to add HTTPS.${NC}"
+  echo -e "  ${YELLOW}No Cloudflare Tunnel configured.${NC}"
+  echo -e "  ${YELLOW}Re-run 'sudo zettabrain-setup' and enter a tunnel token to enable HTTPS.${NC}"
 fi
 echo ""
 echo -e "${CYAN}─── Useful Commands ─────────────────────────────────────${NC}"
@@ -684,6 +765,7 @@ echo -e "  CLI chat          : ${YELLOW}zettabrain-chat${NC}"
 echo -e "  Ingest documents  : ${YELLOW}zettabrain-ingest --rebuild${NC}"
 echo -e "  Check status      : ${YELLOW}zettabrain-status${NC}"
 echo -e "  View server logs  : ${YELLOW}journalctl -u zettabrain -f${NC}"
+echo -e "  Tunnel logs       : ${YELLOW}journalctl -u cloudflared -f${NC}"
 echo ""
 
-log "Setup complete. Type=${STORAGE_TYPE} Path=${PRIMARY_PATH} Docs=${DOC_COUNT}"
+log "Setup complete. Type=${STORAGE_TYPE} Path=${PRIMARY_PATH} Docs=${DOC_COUNT} Tunnel=${TUNNEL_ENABLED}"
