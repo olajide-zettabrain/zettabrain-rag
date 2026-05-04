@@ -13,8 +13,9 @@ from . import __version__
 
 PKG_DIR     = Path(__file__).parent
 SCRIPTS_DIR = PKG_DIR / "scripts"
-SETUP_SCRIPT       = SCRIPTS_DIR / "setup.sh"
-STORAGE_ADD_SCRIPT = SCRIPTS_DIR / "storage_add.sh"
+SETUP_SCRIPT        = SCRIPTS_DIR / "setup.sh"
+STORAGE_ADD_SCRIPT  = SCRIPTS_DIR / "storage_add.sh"
+LETSENCRYPT_SCRIPT  = SCRIPTS_DIR / "letsencrypt.sh"
 DEPLOY_DIR  = Path("/opt/zettabrain/src")
 CERT_DIR    = Path("/opt/zettabrain/certs")
 CONFIG_FILE = DEPLOY_DIR / "zettabrain.env"
@@ -207,11 +208,15 @@ def server_cmd():
     if args.host == "0.0.0.0":
         print(f"    {proto}://localhost:{args.port}")
     if use_tls:
-        fingerprint = cfg.get("ZETTABRAIN_TLS_FINGERPRINT", "")
-        print(f"\n  Certificate fingerprint (SHA-256):")
-        print(f"    {fingerprint}")
-        print(f"\n  Note: Accept the browser's self-signed certificate warning")
-        print(f"  by clicking 'Advanced' → 'Proceed to site'")
+        tls_type = cfg.get("ZETTABRAIN_TLS_TYPE", "self-signed")
+        if tls_type == "letsencrypt":
+            print(f"\n  Certificate : Let's Encrypt (trusted)")
+        else:
+            fingerprint = cfg.get("ZETTABRAIN_TLS_FINGERPRINT", "")
+            print(f"\n  Certificate fingerprint (SHA-256):")
+            print(f"    {fingerprint}")
+            print(f"\n  Note: Accept the browser's self-signed certificate warning")
+            print(f"  by clicking 'Advanced' → 'Proceed to site'")
     else:
         print(f"\n  WARNING: TLS not configured. Run 'sudo zettabrain-setup' first.")
     print(f"\n  Press Ctrl+C to stop.\n")
@@ -231,6 +236,25 @@ def server_cmd():
     uvicorn.run(**uvicorn_kwargs)
 
 
+
+
+# -------------------------------------------------------
+# zettabrain-cert
+# -------------------------------------------------------
+def cert_cmd():
+    """Obtain a Let's Encrypt wildcard certificate via DNS-01 challenge."""
+    _deploy_scripts()
+    _banner()
+
+    if os.geteuid() != 0:
+        print("ERROR: Certificate setup requires root privileges.")
+        print("Run:   sudo zettabrain-cert\n")
+        sys.exit(1)
+
+    _require(LETSENCRYPT_SCRIPT)
+    LETSENCRYPT_SCRIPT.chmod(0o755)
+    result = subprocess.run(["bash", str(LETSENCRYPT_SCRIPT)])
+    sys.exit(result.returncode)
 
 
 # -------------------------------------------------------
