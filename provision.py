@@ -35,7 +35,7 @@ CONFIG = {
     "CF_API_TOKEN":  os.environ.get("CF_API_TOKEN",  ""),
     "CF_ACCOUNT_ID": os.environ.get("CF_ACCOUNT_ID", ""),
     "CF_ZONE_ID":    os.environ.get("CF_ZONE_ID",    ""),
-    "DOMAIN":        "zettabrain.io",
+    "DOMAIN":        "zettabrain.app",
     "LOCAL_SERVICE": "http://localhost:7860",
 }
 # ── End configuration ──────────────────────────────────────────────────────────

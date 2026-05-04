@@ -531,13 +531,11 @@ success "Storage registry saved: ${STORAGE_CONFIG}"
 step "Step 4/5: Secure HTTPS (Cloudflare Tunnel)"
 
 echo ""
-echo "  Cloudflare Tunnel gives users a trusted HTTPS URL like"
-echo "  https://your-company.zettabrain.io — no cert management needed."
+echo "  Cloudflare Tunnel gives you a trusted HTTPS URL like"
+echo "  https://your-company.zettabrain.app — no cert management needed."
 echo ""
-echo "  To get a token (takes 2 minutes):"
-echo "    1. https://one.dash.cloudflare.com → Zero Trust → Networks → Tunnels"
-echo "    2. Create Tunnel → Docker → copy the token shown"
-echo "    3. Add Public Hostname: <subdomain>.zettabrain.io → http://localhost:7860"
+echo "  Your ZettaBrain administrator will provide a tunnel token."
+echo "  (Tokens are generated with: python provision.py <customer-name>)"
 echo ""
 read -rp "  Paste Cloudflare Tunnel token (Enter to skip): " TUNNEL_TOKEN
 echo ""
@@ -747,7 +745,7 @@ if [ "$TUNNEL_ENABLED" = "true" ]; then
     echo -e "  Open in browser: ${BOLD}${CF_HOSTNAME}${NC}"
   else
     echo -e "  Open in browser: the public hostname you configured in Cloudflare"
-    echo -e "  (e.g. ${BOLD}https://your-subdomain.zettabrain.io${NC})"
+    echo -e "  (e.g. ${BOLD}https://your-subdomain.zettabrain.app${NC})"
   fi
   echo ""
   echo -e "  Local access only: ${BOLD}http://localhost:7860${NC}"
