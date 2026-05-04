@@ -453,21 +453,107 @@ else
   fi
 fi
 
-# LLM — large download, ask first
-LLM_MODEL="${ZETTABRAIN_LLM_MODEL:-llama3.1:8b}"
+# ── GPU detection → recommend the best model for this hardware ────────────────
+_GPU_TYPE="none"
+_VRAM_GB=0
+_GPU_NAME="CPU only"
+
+if command -v nvidia-smi &>/dev/null 2>&1; then
+  _nv=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
+  if [ -n "$_nv" ]; then
+    _GPU_NAME=$(echo "$_nv" | cut -d',' -f1 | xargs)
+    _vram_mb=$(echo "$_nv" | cut -d',' -f2 | xargs)
+    _VRAM_GB=$(( _vram_mb / 1024 ))
+    _GPU_TYPE="nvidia"
+  fi
+fi
+
+if [ "$_GPU_TYPE" = "none" ] && command -v rocm-smi &>/dev/null 2>&1; then
+  _vram_mb=$(rocm-smi --showmeminfo vram 2>/dev/null | grep -oP '\d+(?= MB)' | head -1)
+  if [ -n "$_vram_mb" ]; then
+    _VRAM_GB=$(( _vram_mb / 1024 ))
+    _GPU_TYPE="amd"
+    _GPU_NAME="AMD GPU"
+  fi
+fi
+
+if [ "$_GPU_TYPE" = "none" ] && [ "$(uname -m 2>/dev/null)" = "arm64" ]; then
+  _ram_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
+  if [ "$_ram_gb" -gt 0 ]; then
+    _VRAM_GB="$_ram_gb"
+    _GPU_TYPE="apple"
+    _GPU_NAME="Apple Silicon (unified memory ${_ram_gb}GB)"
+  fi
+fi
+
+# Map VRAM to model recommendations
+declare -A _MODEL_OPTIONS=(
+  ["llama3.2:3b"]="Llama 3.2 3B   — fastest, ~2GB,  good for quick answers"
+  ["llama3.1:8b"]="Llama 3.1 8B   — balanced, ~5GB, recommended default"
+  ["mistral:7b"]="Mistral 7B      — fast, ~4GB,      strong reasoning"
+  ["llama3.1:13b"]="Llama 3.1 13B — better, ~8GB,   needs 12GB+ VRAM"
+  ["qwen2.5:14b"]="Qwen 2.5 14B   — excellent, ~9GB, needs 16GB+ VRAM"
+  ["qwen2.5:32b"]="Qwen 2.5 32B   — best quality, ~20GB, needs 24GB+ VRAM"
+)
+
+if [ "$_GPU_TYPE" = "none" ] || [ "$_VRAM_GB" -lt 4 ]; then
+  _RECOMMENDED_MODEL="llama3.2:3b"
+  _RECOMMENDED_REASON="CPU-only or low VRAM: fastest inference"
+elif [ "$_VRAM_GB" -ge 24 ]; then
+  _RECOMMENDED_MODEL="qwen2.5:32b"
+  _RECOMMENDED_REASON="${_VRAM_GB}GB VRAM detected: best quality model"
+elif [ "$_VRAM_GB" -ge 16 ]; then
+  _RECOMMENDED_MODEL="qwen2.5:14b"
+  _RECOMMENDED_REASON="${_VRAM_GB}GB VRAM detected: high quality model"
+elif [ "$_VRAM_GB" -ge 12 ]; then
+  _RECOMMENDED_MODEL="llama3.1:13b"
+  _RECOMMENDED_REASON="${_VRAM_GB}GB VRAM detected: strong quality model"
+else
+  _RECOMMENDED_MODEL="llama3.1:8b"
+  _RECOMMENDED_REASON="${_VRAM_GB}GB VRAM detected: balanced quality/speed"
+fi
+
+echo ""
+info "Hardware detected: ${_GPU_NAME}"
+info "Recommended model: ${_RECOMMENDED_MODEL}  (${_RECOMMENDED_REASON})"
+echo ""
+echo "  Available models:"
+echo "    1) llama3.2:3b    — fastest (~2GB)       good for quick Q&A"
+echo "    2) llama3.1:8b    — balanced (~5GB)      recommended for most"
+echo "    3) mistral:7b     — fast (~4GB)           strong reasoning"
+echo "    4) llama3.1:13b   — better (~8GB)         needs 12GB+ VRAM/RAM"
+echo "    5) qwen2.5:14b    — excellent (~9GB)      needs 16GB+ VRAM/RAM"
+echo "    6) qwen2.5:32b    — best quality (~20GB)  needs 24GB+ VRAM/RAM"
+echo "    7) Custom — enter your own model name"
+echo ""
+echo "  GPU: ${_GPU_NAME}  |  Press Enter to accept recommended"
+read -rp "  Choose [1-7] or Enter for recommended (${_RECOMMENDED_MODEL}): " _model_choice
+
+case "$_model_choice" in
+  1) LLM_MODEL="llama3.2:3b" ;;
+  2) LLM_MODEL="llama3.1:8b" ;;
+  3) LLM_MODEL="mistral:7b" ;;
+  4) LLM_MODEL="llama3.1:13b" ;;
+  5) LLM_MODEL="qwen2.5:14b" ;;
+  6) LLM_MODEL="qwen2.5:32b" ;;
+  7) read -rp "  Enter model name (e.g. llama3.2:1b): " LLM_MODEL ;;
+  *) LLM_MODEL="$_RECOMMENDED_MODEL" ;;
+esac
+
+success "Selected LLM: ${LLM_MODEL}"
+echo ""
+
 if ollama list 2>/dev/null | grep -q "^${LLM_MODEL}"; then
   info "LLM already present: ${LLM_MODEL}"
 else
-  warn "LLM model not found: ${LLM_MODEL} (~4.9GB)"
-  echo ""
-  read -rp "  Pull LLM model now? [y/N]: " _pull_llm
-  if [[ $_pull_llm =~ ^[Yy]$ ]]; then
+  read -rp "  Pull ${LLM_MODEL} now? [Y/n]: " _pull_llm
+  if [[ ! $_pull_llm =~ ^[Nn]$ ]]; then
     info "Pulling ${LLM_MODEL} — this may take several minutes..."
     if ollama pull "$LLM_MODEL"; then
       success "LLM ready: ${LLM_MODEL}"
     else
       warn "LLM pull failed. Run later: ollama pull ${LLM_MODEL}"
-      LLM_MODEL="(not pulled)"
+      LLM_MODEL="${_RECOMMENDED_MODEL}"
     fi
   else
     warn "Skipped. Run when ready: ollama pull ${LLM_MODEL}"

@@ -608,12 +608,20 @@ function finishStreaming(data) {
     const cursor = document.querySelector(`#${currentMsgId} .cursor`);
     if (cursor) cursor.remove();
 
-    // Add model info to meta
+    // Add model info + timing to meta
     if (data && data.model) {
       const meta = document.getElementById(currentMsgId + '-meta');
       if (meta) {
-        const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        meta.textContent = `${time} · ${data.model} · ${data.chunks_searched || 0} chunks`;
+        const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        let timingStr = '';
+        if (data.timing) {
+          const rMs = data.timing.retrieve_ms;
+          const gMs = data.timing.generate_ms;
+          const rStr = rMs >= 1000 ? (rMs/1000).toFixed(1)+'s' : rMs+'ms';
+          const gStr = gMs >= 1000 ? (gMs/1000).toFixed(1)+'s' : gMs+'ms';
+          timingStr = ` · ⚡ ${rStr} retrieve · 🤖 ${gStr} generate`;
+        }
+        meta.textContent = `${ts} · ${data.model} · ${data.chunks_searched || 0} chunks${timingStr}`;
       }
     }
   }

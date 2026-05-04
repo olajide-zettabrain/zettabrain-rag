@@ -8,6 +8,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -56,9 +58,103 @@ KEY_FILE     = _cfg.get("ZETTABRAIN_KEY",          str(CERT_DIR / "key.pem"))
 FINGERPRINT  = _cfg.get("ZETTABRAIN_TLS_FINGERPRINT", "")
 
 # -------------------------------------------------------
+# Vectorstore cache — one instance shared across all requests
+# -------------------------------------------------------
+_vs_lock     = threading.Lock()
+_vs_cache: dict = {"vs": None}
+
+def _get_vs():
+    """Return the cached Chroma instance, initialising on first call."""
+    with _vs_lock:
+        if _vs_cache["vs"] is None:
+            from langchain_ollama import OllamaEmbeddings
+            from langchain_chroma import Chroma
+            emb = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
+            _vs_cache["vs"] = Chroma(
+                persist_directory=str(CHROMA_PATH),
+                embedding_function=emb,
+                collection_name="zettabrain_docs",
+            )
+        return _vs_cache["vs"]
+
+def _reset_vs_cache():
+    with _vs_lock:
+        _vs_cache["vs"] = None
+
+
+# -------------------------------------------------------
+# GPU detection
+# -------------------------------------------------------
+def _get_gpu_info() -> dict:
+    info = {"type": "none", "name": None, "vram_gb": 0, "recommended_model": None}
+    # NVIDIA
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name,memory.total",
+             "--format=csv,noheader,nounits"],
+            stderr=subprocess.DEVNULL, timeout=5
+        ).decode().strip().splitlines()[0]
+        name, vram_mb = [s.strip() for s in out.split(",")]
+        vram_gb = int(vram_mb) // 1024
+        info.update({"type": "nvidia", "name": name, "vram_gb": vram_gb})
+    except Exception:
+        pass
+
+    # AMD (ROCm)
+    if info["type"] == "none":
+        try:
+            out = subprocess.check_output(
+                ["rocm-smi", "--showmeminfo", "vram"], stderr=subprocess.DEVNULL, timeout=5
+            ).decode()
+            import re
+            m = re.search(r"(\d+)\s*MB", out)
+            if m:
+                info.update({"type": "amd", "vram_gb": int(m.group(1)) // 1024})
+        except Exception:
+            pass
+
+    # Apple Silicon (Metal — unified memory)
+    if info["type"] == "none":
+        try:
+            if subprocess.check_output(["uname", "-m"]).decode().strip() == "arm64":
+                mem = int(subprocess.check_output(
+                    ["sysctl", "-n", "hw.memsize"]).decode().strip())
+                info.update({"type": "apple_silicon", "vram_gb": mem // 1_073_741_824})
+        except Exception:
+            pass
+
+    # Recommend model based on available VRAM
+    vg = info["vram_gb"]
+    if info["type"] == "none" or vg == 0:
+        info["recommended_model"] = "llama3.2:3b"
+    elif vg >= 24:
+        info["recommended_model"] = "qwen2.5:32b"
+    elif vg >= 16:
+        info["recommended_model"] = "llama3.1:13b"
+    elif vg >= 8:
+        info["recommended_model"] = "llama3.1:8b"
+    else:
+        info["recommended_model"] = "llama3.2:3b"
+
+    return info
+
+
+# -------------------------------------------------------
 # App
 # -------------------------------------------------------
 app = FastAPI(title="ZettaBrain RAG", version="0.2.0")
+
+
+@app.on_event("startup")
+async def _warmup():
+    """Pre-load the vectorstore and FlashRank so the first query isn't slow."""
+    if not CHROMA_PATH.exists():
+        return
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _get_vs)
+    except Exception:
+        pass
 
 app.add_middleware(
     CORSMiddleware,
@@ -219,8 +315,9 @@ async def status():
             "configured":  any(Path(s["path"]).exists() for s in storage_sources),
             "sources":     storage_sources,
         },
-        "tls":     _get_tls_info(),
-        "sources": ingested,
+        "hardware": _get_gpu_info(),
+        "tls":      _get_tls_info(),
+        "sources":  ingested,
     }
 
 
@@ -248,6 +345,8 @@ async def ingest(req: IngestRequest):
     try:
         result = subprocess.run(cmd, cwd=str(DEPLOY_DIR),
                                 capture_output=True, text=True, timeout=600)
+        if result.returncode == 0:
+            _reset_vs_cache()  # force reload so new chunks are immediately queryable
         return {
             "success": result.returncode == 0,
             "output":  result.stdout,
@@ -268,28 +367,41 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=422, detail="Vector store is empty. Run ingestion first.")
 
     model = req.model or LLM_MODEL
-    try:
-        from langchain_ollama import OllamaEmbeddings, OllamaLLM
-        from langchain_chroma import Chroma
+    question = req.question
+
+    def _run():
+        from langchain_ollama import OllamaLLM
         from langchain_core.prompts import PromptTemplate
         from langchain_core.output_parsers import StrOutputParser
 
-        embeddings  = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
-        vectorstore = Chroma(persist_directory=str(CHROMA_PATH),
-                             embedding_function=embeddings,
-                             collection_name="zettabrain_docs")
-        sources  = hybrid_retrieve(req.question, vectorstore)
-        context  = format_context(sources)
-        prompt   = PromptTemplate.from_template(RAG_PROMPT)
-        llm      = OllamaLLM(model=model, base_url=OLLAMA_URL, temperature=0.0, num_predict=1024)
-        answer   = (prompt | llm | StrOutputParser()).invoke(
-                       {"context": context, "question": req.question}
-                   )
+        vs      = _get_vs()
+        t0      = time.monotonic()
+        sources = hybrid_retrieve(question, vs)
+        t_retr  = time.monotonic() - t0
+
+        context = format_context(sources)
+        prompt  = PromptTemplate.from_template(RAG_PROMPT)
+        llm     = OllamaLLM(model=model, base_url=OLLAMA_URL,
+                             temperature=0.0, num_predict=1024)
+        t1      = time.monotonic()
+        answer  = (prompt | llm | StrOutputParser()).invoke(
+                      {"context": context, "question": question}
+                  )
+        t_gen   = time.monotonic() - t1
+        return sources, answer, t_retr, t_gen
+
+    try:
+        loop = asyncio.get_event_loop()
+        sources, answer, t_retr, t_gen = await loop.run_in_executor(None, _run)
 
         return {
             "answer":          answer,
             "model":           model,
             "chunks_searched": len(sources),
+            "timing": {
+                "retrieve_ms": round(t_retr * 1000),
+                "generate_ms": round(t_gen  * 1000),
+            },
             "sources": [
                 {"filename": Path(s.metadata.get("source", "?")).name,
                  "page":     s.metadata.get("page", ""),
@@ -322,15 +434,14 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             try:
-                from langchain_ollama import OllamaEmbeddings
-                from langchain_chroma import Chroma
+                loop = asyncio.get_event_loop()
+                vectorstore = await loop.run_in_executor(None, _get_vs)
 
-                embeddings  = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
-                vectorstore = Chroma(persist_directory=str(CHROMA_PATH),
-                                     embedding_function=embeddings,
-                                     collection_name="zettabrain_docs")
-
-                sources     = hybrid_retrieve(question, vectorstore)
+                t_r0    = time.monotonic()
+                sources = await loop.run_in_executor(
+                    None, lambda: hybrid_retrieve(question, vectorstore)
+                )
+                t_retr  = time.monotonic() - t_r0
                 source_list = [
                     {"filename": Path(s.metadata.get("source", "?")).name,
                      "page":     s.metadata.get("page", ""),
@@ -342,17 +453,15 @@ async def websocket_chat(websocket: WebSocket):
                 context     = format_context(sources)
                 prompt_text = RAG_PROMPT.format(context=context, question=question)
 
-                import asyncio
-
-                loop  = asyncio.get_event_loop()
                 queue: asyncio.Queue = asyncio.Queue()
+                t_g0 = time.monotonic()
 
                 def _stream_ollama():
                     try:
                         resp = requests.post(
                             f"{OLLAMA_URL}/api/generate",
                             json={"model": model, "prompt": prompt_text, "stream": True},
-                            stream=True, timeout=120,
+                            stream=True, timeout=180,
                         )
                         if resp.status_code != 200:
                             asyncio.run_coroutine_threadsafe(
@@ -409,11 +518,16 @@ async def websocket_chat(websocket: WebSocket):
                     })
                     continue
 
+                t_gen = time.monotonic() - t_g0
                 await websocket.send_json({
                     "type":            "done",
                     "answer":          full_answer,
                     "model":           model,
                     "chunks_searched": len(sources),
+                    "timing": {
+                        "retrieve_ms": round(t_retr * 1000),
+                        "generate_ms": round(t_gen  * 1000),
+                    },
                 })
 
             except Exception as e:
@@ -427,6 +541,7 @@ async def websocket_chat(websocket: WebSocket):
 async def clear_vectorstore():
     try:
         import chromadb
+        _reset_vs_cache()
         chromadb.PersistentClient(path=str(CHROMA_PATH)).delete_collection("zettabrain_docs")
         if INGEST_LOG.exists():
             INGEST_LOG.write_text("{}")

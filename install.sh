@@ -1,12 +1,11 @@
 #!/bin/bash
 # ============================================================
 # ZettaBrain RAG — One-line Installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/zettabrain-rag/main/install.sh | bash
+# Usage: curl -fsSL https://zettabrain.app/install.sh | sudo bash
 # ============================================================
 
 set -e
 
-ZETTABRAIN_VERSION="0.1.1"
 INSTALL_DIR="/opt/zettabrain"
 BIN_DIR="/usr/local/bin"
 VENV_DIR="${INSTALL_DIR}/venv"
@@ -52,7 +51,7 @@ clear 2>/dev/null || true
 echo ""
 echo -e "${BLUE}${BOLD}"
 echo "  ╔══════════════════════════════════════════════════════╗"
-echo "  ║           ZettaBrain RAG  v${ZETTABRAIN_VERSION}                    ║"
+echo "  ║               ZettaBrain RAG                        ║"
 echo "  ║   Local private AI — your data stays on device      ║"
 echo "  ╚══════════════════════════════════════════════════════╝"
 echo -e "${NC}"
@@ -202,14 +201,8 @@ success "Python environment ready."
 # -------------------------------------------------------
 step "5/7" "Installing zettabrain-rag"
 
-info "Downloading and installing zettabrain-rag v${ZETTABRAIN_VERSION}..."
-
-"${VENV_PIP}" install --quiet "zettabrain-rag==${ZETTABRAIN_VERSION}"
-
-if [ $? -ne 0 ]; then
-  info "Exact version not available — installing latest..."
-  "${VENV_PIP}" install --quiet zettabrain-rag
-fi
+info "Downloading and installing latest zettabrain-rag..."
+"${VENV_PIP}" install --quiet --upgrade zettabrain-rag
 
 INSTALLED_VERSION=$("${VENV_DIR}/bin/zettabrain" --version 2>/dev/null || echo "unknown")
 success "Installed: ${INSTALLED_VERSION}"
@@ -323,4 +316,4 @@ echo -e "  3. Start chatting:"
 echo -e "     ${CYAN}zettabrain-chat${NC}"
 echo ""
 
-log "Installation completed. Version: ${ZETTABRAIN_VERSION}"
+log "Installation completed. Version: ${INSTALLED_VERSION}"
