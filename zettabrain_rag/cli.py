@@ -13,12 +13,16 @@ from . import __version__
 
 PKG_DIR     = Path(__file__).parent
 SCRIPTS_DIR = PKG_DIR / "scripts"
+CERTS_DIR   = PKG_DIR / "certs"
+BUNDLED_CERT = CERTS_DIR / "cert.pem"
+BUNDLED_KEY  = CERTS_DIR / "key.pem"
 SETUP_SCRIPT        = SCRIPTS_DIR / "setup.sh"
 STORAGE_ADD_SCRIPT  = SCRIPTS_DIR / "storage_add.sh"
 LETSENCRYPT_SCRIPT  = SCRIPTS_DIR / "letsencrypt.sh"
 DEPLOY_DIR  = Path("/opt/zettabrain/src")
 CERT_DIR    = Path("/opt/zettabrain/certs")
 CONFIG_FILE = DEPLOY_DIR / "zettabrain.env"
+LOCAL_HOSTNAME = "local.zettabrain.app"
 
 DEPLOY_SCRIPTS = [
     "03_langchain_rag.py",
@@ -183,40 +187,35 @@ def server_cmd():
         print("ERROR: uvicorn not installed.")
         sys.exit(1)
 
-    cfg            = _load_config()
-    tunnel_enabled = cfg.get("ZETTABRAIN_TUNNEL_ENABLED", "false").lower() == "true"
-    default_host   = "127.0.0.1" if tunnel_enabled else "0.0.0.0"
-
     parser = argparse.ArgumentParser(prog="zettabrain-server",
                                      description="Launch the ZettaBrain web GUI")
-    parser.add_argument("--host",   default=default_host, help=f"Bind host (default: {default_host})")
+    parser.add_argument("--host",   default="0.0.0.0",  help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port",   default=7860, type=int, help="Port (default: 7860)")
     parser.add_argument("--no-tls", action="store_true",   help="Disable HTTPS (HTTP only)")
     parser.add_argument("--reload", action="store_true",   help="Dev mode: auto-reload")
     args, _ = parser.parse_known_args()
 
+    # Cert resolution order: bundled package cert → deployed cert → no TLS
+    cert_file = key_file = None
+    if not args.no_tls:
+        if BUNDLED_CERT.exists() and BUNDLED_KEY.exists():
+            cert_file, key_file = str(BUNDLED_CERT), str(BUNDLED_KEY)
+        else:
+            cfg = _load_config()
+            _c  = cfg.get("ZETTABRAIN_CERT", str(CERT_DIR / "cert.pem"))
+            _k  = cfg.get("ZETTABRAIN_KEY",  str(CERT_DIR / "key.pem"))
+            if Path(_c).exists() and Path(_k).exists():
+                cert_file, key_file = _c, _k
+
+    use_tls = cert_file is not None
+    proto   = "https" if use_tls else "http"
+
     print(f"  Starting ZettaBrain GUI...")
-
-    if tunnel_enabled:
-        print(f"  Mode      : HTTP on localhost (Cloudflare Tunnel handles HTTPS)")
-        print(f"  Local     : http://localhost:{args.port}")
-        print(f"  Public    : your configured https://<subdomain>.zettabrain.io")
-    else:
-        cert_file = cfg.get("ZETTABRAIN_CERT", str(CERT_DIR / "cert.pem"))
-        key_file  = cfg.get("ZETTABRAIN_KEY",  str(CERT_DIR / "key.pem"))
-        use_tls   = (not args.no_tls
-                     and Path(cert_file).exists()
-                     and Path(key_file).exists())
-        proto     = "https" if use_tls else "http"
-        host_ip   = cfg.get("ZETTABRAIN_SERVER_HOST", "localhost")
-        print(f"  Protocol  : {'HTTPS' if use_tls else 'HTTP'}")
-        print(f"  Open in browser: {proto}://{host_ip}:{args.port}")
-        if args.host == "0.0.0.0":
-            print(f"               : {proto}://localhost:{args.port}")
-        if not use_tls:
-            print(f"\n  Tip: run 'sudo zettabrain-setup' and enter a Cloudflare Tunnel token")
-            print(f"       to enable trusted HTTPS for your users.")
-
+    print(f"  Protocol : {'HTTPS — trusted certificate' if use_tls else 'HTTP (no certificate)'}")
+    print(f"\n  Open in browser:")
+    if use_tls:
+        print(f"    https://{LOCAL_HOSTNAME}:{args.port}   ← trusted, fully private")
+    print(f"    {proto}://localhost:{args.port}")
     print(f"\n  Press Ctrl+C to stop.\n")
 
     import uvicorn
@@ -227,13 +226,9 @@ def server_cmd():
         reload=args.reload,
         log_level="warning",
     )
-
-    if not tunnel_enabled and not args.no_tls:
-        cert_file = cfg.get("ZETTABRAIN_CERT", str(CERT_DIR / "cert.pem"))
-        key_file  = cfg.get("ZETTABRAIN_KEY",  str(CERT_DIR / "key.pem"))
-        if Path(cert_file).exists() and Path(key_file).exists():
-            uvicorn_kwargs["ssl_certfile"] = cert_file
-            uvicorn_kwargs["ssl_keyfile"]  = key_file
+    if use_tls:
+        uvicorn_kwargs["ssl_certfile"] = cert_file
+        uvicorn_kwargs["ssl_keyfile"]  = key_file
 
     uvicorn.run(**uvicorn_kwargs)
 

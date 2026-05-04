@@ -1,0 +1,5 @@
+# Keep the directory but never commit real cert files to git
+*.pem
+*.key
+*.crt
+!.gitkeep

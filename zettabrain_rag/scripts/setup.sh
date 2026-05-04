@@ -526,103 +526,29 @@ STEOF
 success "Storage registry saved: ${STORAGE_CONFIG}"
 
 # ================================================================
-# STEP 4/5 — SECURE HTTPS VIA CLOUDFLARE TUNNEL
+# STEP 4/5 — TLS CERTIFICATE (bundled)
 # ================================================================
-step "Step 4/5: Secure HTTPS (Cloudflare Tunnel)"
+step "Step 4/5: TLS certificate"
 
-echo ""
-echo "  Cloudflare Tunnel gives you a trusted HTTPS URL like"
-echo "  https://your-company.zettabrain.app — no cert management needed."
-echo ""
-echo "  Your ZettaBrain administrator will provide a tunnel token."
-echo "  (Tokens are generated with: python provision.py <customer-name>)"
-echo ""
-read -rp "  Paste Cloudflare Tunnel token (Enter to skip): " TUNNEL_TOKEN
-echo ""
+# Locate the cert bundled inside the installed package
+PKG_CERT=""
+for _venv in \
+    /root/.local/share/pipx/venvs/zettabrain-rag \
+    /home/*/.local/share/pipx/venvs/zettabrain-rag; do
+  _c="${_venv}/lib/python*/site-packages/zettabrain_rag/certs/cert.pem"
+  _k="${_venv}/lib/python*/site-packages/zettabrain_rag/certs/key.pem"
+  for _cf in $_c; do
+    [ -f "$_cf" ] && PKG_CERT="$_cf" && break 2
+  done
+done
 
-TUNNEL_ENABLED=false
-
-if [ -n "$TUNNEL_TOKEN" ]; then
-  # ── Download cloudflared ─────────────────────────────────────────────────
-  ARCH=$(uname -m)
-  case "$ARCH" in
-    x86_64)  CF_ARCH="amd64" ;;
-    aarch64) CF_ARCH="arm64" ;;
-    armv7l)  CF_ARCH="arm"   ;;
-    *) warn "Unsupported arch ${ARCH} — install cloudflared manually"; CF_ARCH="" ;;
-  esac
-
-  if [ -n "$CF_ARCH" ] && ! command -v cloudflared &>/dev/null; then
-    info "Downloading cloudflared (${CF_ARCH})..."
-    CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}"
-    if curl -fsSL "$CF_URL" -o /usr/local/bin/cloudflared 2>>"$LOG_FILE"; then
-      chmod +x /usr/local/bin/cloudflared
-      success "cloudflared installed: $(/usr/local/bin/cloudflared --version 2>&1 | head -1)"
-    else
-      warn "cloudflared download failed. Install from:"
-      warn "  https://github.com/cloudflare/cloudflared/releases"
-    fi
-  else
-    [ -n "$CF_ARCH" ] && info "cloudflared already installed: $(cloudflared --version 2>&1 | head -1)"
-  fi
-
-  # ── Install tunnel as a systemd service ──────────────────────────────────
-  CLOUDFLARED_BIN=$(command -v cloudflared 2>/dev/null || echo /usr/local/bin/cloudflared)
-  if [ -x "$CLOUDFLARED_BIN" ]; then
-    step "Installing Cloudflare Tunnel as a system service"
-    # Remove any previous service first (idempotent reinstall)
-    "$CLOUDFLARED_BIN" service uninstall 2>/dev/null || true
-    systemctl stop cloudflared 2>/dev/null || true
-
-    _CF_INSTALLED=false
-    if "$CLOUDFLARED_BIN" service install "$TUNNEL_TOKEN" >> "$LOG_FILE" 2>&1; then
-      _CF_INSTALLED=true
-    else
-      # Fallback: write systemd unit manually (works when cloudflared service install fails)
-      info "Falling back to manual systemd unit..."
-      cat > /etc/systemd/system/cloudflared.service << CFEOF
-[Unit]
-Description=Cloudflare Tunnel
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=${CLOUDFLARED_BIN} tunnel run --token ${TUNNEL_TOKEN}
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-CFEOF
-      _CF_INSTALLED=true
-    fi
-
-    if [ "$_CF_INSTALLED" = "true" ]; then
-      systemctl daemon-reload >> "$LOG_FILE" 2>&1 || true
-      systemctl enable cloudflared >> "$LOG_FILE" 2>&1 || true
-      systemctl restart cloudflared >> "$LOG_FILE" 2>&1 || true
-      sleep 3
-      if systemctl is-active --quiet cloudflared 2>/dev/null; then
-        success "Cloudflare Tunnel is running"
-        TUNNEL_ENABLED=true
-      else
-        warn "Tunnel installed but not yet active."
-        warn "Check: sudo systemctl status cloudflared"
-        warn "Logs : sudo journalctl -u cloudflared -n 30"
-      fi
-    fi
-  else
-    warn "cloudflared binary not found — tunnel not configured"
-  fi
-
-  # ── Update config ────────────────────────────────────────────────────────
-  _upsert "ZETTABRAIN_TUNNEL_ENABLED" "$TUNNEL_ENABLED"
+if [ -n "$PKG_CERT" ]; then
+  success "Bundled TLS certificate found — HTTPS enabled automatically."
+  info  "Access the GUI at: https://local.zettabrain.app:7860"
 else
-  info "Skipped. Run 'sudo zettabrain-cert' to add HTTPS later."
+  warn "Bundled certificate not found in package."
+  warn "Ensure you installed via: pipx install zettabrain-rag"
+  warn "The server will fall back to HTTP until the cert is present."
 fi
 
 # ================================================================
@@ -709,17 +635,10 @@ step "Installing ZettaBrain as a system service"
 _server_bin=$(command -v zettabrain-server 2>/dev/null \
               || echo "/root/.local/bin/zettabrain-server")
 
-# When behind Cloudflare Tunnel, bind to localhost only (Cloudflare proxies externally)
-if [ "$TUNNEL_ENABLED" = "true" ]; then
-  _server_args="--host 127.0.0.1 --port 7860 --no-tls"
-else
-  _server_args="--host 0.0.0.0 --port 7860 --no-tls"
-fi
-
 cat > /etc/systemd/system/zettabrain.service << SVCEOF
 [Unit]
 Description=ZettaBrain RAG Web Server
-After=network-online.target ollama.service cloudflared.service
+After=network-online.target ollama.service
 Wants=network-online.target
 Requires=ollama.service
 
@@ -727,7 +646,7 @@ Requires=ollama.service
 Type=simple
 User=root
 WorkingDirectory=${DEPLOY_DIR}
-ExecStart=${_server_bin} ${_server_args}
+ExecStart=${_server_bin} --host 0.0.0.0 --port 7860
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -762,29 +681,14 @@ echo ""
 echo -e "  Storage type : ${GREEN}${STORAGE_TYPE^^}${NC}"
 echo -e "  Docs path    : ${GREEN}${PRIMARY_PATH}${NC}"
 echo -e "  Documents    : ${GREEN}${DOC_COUNT} file(s)${NC}"
-echo -e "  Tunnel       : ${GREEN}${TUNNEL_ENABLED}${NC}"
 echo -e "  Config file  : ${GREEN}${CONFIG_FILE}${NC}"
 echo ""
 echo -e "${CYAN}─── Access the GUI ──────────────────────────────────────${NC}"
 echo ""
-if [ "$TUNNEL_ENABLED" = "true" ]; then
-  CF_HOSTNAME=$(cloudflared tunnel info 2>/dev/null | grep -oP 'https://\S+' | head -1 || echo "")
-  echo -e "  ${GREEN}Cloudflare Tunnel is active — fully trusted HTTPS${NC}"
-  echo ""
-  if [ -n "$CF_HOSTNAME" ]; then
-    echo -e "  Open in browser: ${BOLD}${CF_HOSTNAME}${NC}"
-  else
-    echo -e "  Open in browser: the public hostname you configured in Cloudflare"
-    echo -e "  (e.g. ${BOLD}https://your-subdomain.zettabrain.app${NC})"
-  fi
-  echo ""
-  echo -e "  Local access only: ${BOLD}http://localhost:7860${NC}"
-else
-  echo -e "  Open in browser (local network): ${BOLD}http://${PRIMARY_IP}:7860${NC}"
-  echo ""
-  echo -e "  ${YELLOW}No Cloudflare Tunnel configured.${NC}"
-  echo -e "  ${YELLOW}Re-run 'sudo zettabrain-setup' and enter a tunnel token to enable HTTPS.${NC}"
-fi
+echo -e "  Open in browser: ${BOLD}https://local.zettabrain.app:7860${NC}"
+echo ""
+echo -e "  ${GREEN}Trusted HTTPS certificate — no browser warnings.${NC}"
+echo -e "  ${GREEN}Traffic stays entirely on this machine (127.0.0.1).${NC}"
 echo ""
 echo -e "${CYAN}─── Useful Commands ─────────────────────────────────────${NC}"
 echo ""
@@ -793,7 +697,6 @@ echo -e "  CLI chat          : ${YELLOW}zettabrain-chat${NC}"
 echo -e "  Ingest documents  : ${YELLOW}zettabrain-ingest --rebuild${NC}"
 echo -e "  Check status      : ${YELLOW}zettabrain-status${NC}"
 echo -e "  View server logs  : ${YELLOW}journalctl -u zettabrain -f${NC}"
-echo -e "  Tunnel logs       : ${YELLOW}journalctl -u cloudflared -f${NC}"
 echo ""
 
-log "Setup complete. Type=${STORAGE_TYPE} Path=${PRIMARY_PATH} Docs=${DOC_COUNT} Tunnel=${TUNNEL_ENABLED}"
+log "Setup complete. Type=${STORAGE_TYPE} Path=${PRIMARY_PATH} Docs=${DOC_COUNT}"
