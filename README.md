@@ -15,7 +15,7 @@ curl -fsSL https://zettabrain.app/install.sh | sudo bash
 Alternative mirror:
 
 ```bash
-curl -fsSL https://install.zettabrain.io/install.sh | sudo bash
+curl -fsSL https://install.zettabrain.io | sudo bash
 ```
 
 What the installer does:
