@@ -101,7 +101,7 @@ fi
 success "Python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 
 case "$PKG_MANAGER" in
-  apt) apt-get update -qq >> "$LOG_FILE" 2>&1; _pkg python3-pip python3-venv curl git ;;
+  apt) apt-get update -qq >> "$LOG_FILE" 2>&1; _pkg python3-pip python3-venv pipx curl git ;;
   yum|dnf) _pkg python3-pip curl git ;;
 esac
 
@@ -110,26 +110,97 @@ success "System dependencies installed."
 # ── 3/4 Install ZettaBrain RAG via pipx ──────────────────────
 step "3/4" "Installing ZettaBrain RAG"
 
-# Install pipx if missing
-if ! command -v pipx &>/dev/null; then
+# Ensure pipx is available — prefer the apt/system version installed above;
+# fall back to pip with --break-system-packages for Ubuntu 23.04+ / Debian 12+
+# which block `pip install` into the system Python by default.
+_ensure_pipx() {
+  # Already on PATH — done
+  if command -v pipx &>/dev/null; then return 0; fi
+
   info "Installing pipx..."
-  "$PYTHON_BIN" -m pip install --quiet --upgrade pipx >> "$LOG_FILE" 2>&1
-  "$PYTHON_BIN" -m pipx ensurepath >> "$LOG_FILE" 2>&1
-  export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+
+  # Try apt / dnf / yum package first (safest on modern distros)
+  case "$PKG_MANAGER" in
+    apt)
+      if apt-get install -y -qq pipx >> "$LOG_FILE" 2>&1; then
+        hash -r 2>/dev/null || true
+        command -v pipx &>/dev/null && return 0
+      fi ;;
+    yum|dnf)
+      if "$PKG_MANAGER" install -y -q pipx >> "$LOG_FILE" 2>&1; then
+        hash -r 2>/dev/null || true
+        command -v pipx &>/dev/null && return 0
+      fi ;;
+  esac
+
+  # pip fallback — use --break-system-packages to bypass the
+  # "externally-managed-environment" guard on Ubuntu 23.04+ / Debian 12+
+  info "apt pipx not available — installing via pip..."
+  if "$PYTHON_BIN" -m pip install --quiet --break-system-packages --upgrade pipx \
+       >> "$LOG_FILE" 2>&1; then
+    "$PYTHON_BIN" -m pipx ensurepath >> "$LOG_FILE" 2>&1 || true
+    export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+    hash -r 2>/dev/null || true
+    command -v pipx &>/dev/null && return 0
+  fi
+
+  # Last resort: user-level install without --break-system-packages
+  "$PYTHON_BIN" -m pip install --quiet --user --upgrade pipx >> "$LOG_FILE" 2>&1 || true
+  "$PYTHON_BIN" -m pipx ensurepath >> "$LOG_FILE" 2>&1 || true
+  export PATH="$HOME/.local/bin:$PATH"
   hash -r 2>/dev/null || true
-fi
+  command -v pipx &>/dev/null || die "Could not install pipx. Check log: $LOG_FILE"
+}
 
-# Install or upgrade
+_ensure_pipx
+success "pipx $(pipx --version 2>/dev/null)"
+
+# Install or upgrade — show live output so the user can see download progress
+echo ""
 if pipx list 2>/dev/null | grep -q "zettabrain-rag"; then
-  info "Upgrading zettabrain-rag to latest..."
-  pipx upgrade zettabrain-rag >> "$LOG_FILE" 2>&1
+  info "Upgrading zettabrain-rag (downloading latest + dependencies)..."
+  echo "  (This can take 2-5 minutes on first upgrade — please wait)"
+  echo ""
+  pipx upgrade zettabrain-rag 2>&1 | sed 's/^/  /'
 else
-  info "Installing zettabrain-rag from PyPI..."
-  pipx install zettabrain-rag >> "$LOG_FILE" 2>&1
+  info "Installing zettabrain-rag (downloading package + dependencies)..."
+  echo "  (This can take 3-6 minutes — please wait)"
+  echo ""
+  pipx install zettabrain-rag 2>&1 | sed 's/^/  /'
 fi
 
-INSTALLED_VERSION=$(zettabrain --version 2>/dev/null || pipx list 2>/dev/null | grep zettabrain | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "latest")
-success "Installed: ${INSTALLED_VERSION}"
+# ── Make CLI commands globally available ─────────────────────
+# pipx installs to ~/.local/bin which may not be in PATH (common on servers
+# and in sudo shells). Symlink every command into /usr/local/bin which is
+# always present, so `zettabrain-setup` works immediately without PATH changes.
+PIPX_BIN="$HOME/.local/bin"
+export PATH="$PIPX_BIN:/usr/local/bin:$PATH"
+hash -r 2>/dev/null || true
+
+_ZB_CMDS=(zettabrain zettabrain-setup zettabrain-chat zettabrain-ingest \
+           zettabrain-server zettabrain-status zettabrain-storage zettabrain-cert)
+
+for _cmd in "${_ZB_CMDS[@]}"; do
+  _src="${PIPX_BIN}/${_cmd}"
+  if [ -f "$_src" ]; then
+    ln -sf "$_src" "/usr/local/bin/${_cmd}"
+  fi
+done
+
+# Also persist ~/.local/bin in PATH for future interactive sessions
+for _profile in /root/.bashrc /root/.profile /root/.bash_profile \
+                /home/*/.bashrc /home/*/.profile; do
+  [ -f "$_profile" ] || continue
+  grep -qF "$PIPX_BIN" "$_profile" 2>/dev/null || \
+    echo "export PATH=\"$PIPX_BIN:\$PATH\"" >> "$_profile"
+done
+
+INSTALLED_VERSION=$(zettabrain --version 2>/dev/null \
+  || pipx list 2>/dev/null | grep -oP 'zettabrain-rag \K[\d.]+' | head -1 \
+  || echo "latest")
+echo ""
+success "ZettaBrain RAG installed: ${INSTALLED_VERSION}"
+info  "Commands available globally in /usr/local/bin"
 
 # ── 4/4 Install Ollama ───────────────────────────────────────
 step "4/4" "Installing Ollama + embedding model"
@@ -137,8 +208,8 @@ step "4/4" "Installing Ollama + embedding model"
 if command -v ollama &>/dev/null; then
   info "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"
 else
-  info "Installing Ollama..."
-  curl -fsSL https://ollama.com/install.sh | sh >> "$LOG_FILE" 2>&1
+  info "Installing Ollama (downloading ~60MB)..."
+  curl -fsSL https://ollama.com/install.sh | sh 2>&1 | sed 's/^/  /'
   success "Ollama installed."
 fi
 
@@ -150,7 +221,7 @@ if ! systemctl is-active --quiet ollama 2>/dev/null; then
 fi
 
 info "Pulling embedding model: ${EMBED_MODEL} (~275MB)..."
-ollama pull "$EMBED_MODEL" 2>&1 | tail -1
+ollama pull "$EMBED_MODEL" 2>&1 | sed 's/^/  /'
 success "Embedding model ready."
 
 # ── Done ─────────────────────────────────────────────────────

@@ -24,9 +24,18 @@ except ImportError:
     _HAS_BM25 = False
 
 try:
-    from flashrank import Ranker, RerankRequest
-    _ranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="/tmp/flashrank")
-    _HAS_RERANKER = True
+    import os as _os, sys as _sys
+    # Suppress onnxruntime DRM/GPU device warnings on headless servers
+    _os.environ.setdefault("ORT_LOGGING_LEVEL", "3")  # 3 = ERROR only
+    _saved_stderr = _sys.stderr
+    _sys.stderr = open(_os.devnull, "w")
+    try:
+        from flashrank import Ranker, RerankRequest
+        _ranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="/tmp/flashrank")
+        _HAS_RERANKER = True
+    finally:
+        _sys.stderr.close()
+        _sys.stderr = _saved_stderr
 except Exception:
     _ranker = None
     _HAS_RERANKER = False
@@ -122,19 +131,23 @@ def hybrid_retrieve(question: str, vectorstore, top_k: int = 5) -> list:
     """
     Retrieve the top_k most relevant chunks for a question.
 
-    1. MMR semantic search  — fetch 20 candidates
-    2. BM25 keyword search  — fetch 12 candidates
+    1. MMR semantic search  — fetch 25 candidates, return 6 (relevance-focused)
+    2. BM25 keyword search  — fetch 8 candidates
     3. Deduplicate by content hash
     4. Re-rank with FlashRank cross-encoder → return top_k
+
+    MMR tuning: lambda_mult=0.82 keeps results tightly on-topic.
+    Lower values (0.5-0.65) maximise diversity but scatter context across
+    many documents, causing the LLM to report topics as "not covered."
     """
-    # 1. semantic (MMR)
+    # 1. semantic (MMR) — relevance-first, modest diversity
     semantic = vectorstore.as_retriever(
         search_type="mmr",
-        search_kwargs={"k": 20, "fetch_k": 60, "lambda_mult": 0.65},
+        search_kwargs={"k": 6, "fetch_k": 25, "lambda_mult": 0.82},
     ).invoke(question)
 
     # 2. keyword (BM25)
-    keyword = _bm25_search(question, k=12)
+    keyword = _bm25_search(question, k=8)
 
     # 3. merge + deduplicate (semantic results ranked first)
     seen, merged = set(), []
