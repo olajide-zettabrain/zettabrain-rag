@@ -6,28 +6,10 @@
 
 set -e
 
-INSTALL_DIR="/opt/zettabrain"
-BIN_DIR="/usr/local/bin"
-VENV_DIR="${INSTALL_DIR}/venv"
-SRC_DIR="${INSTALL_DIR}/src"
 LOG_FILE="/var/log/zettabrain-install.log"
+EMBED_MODEL="nomic-embed-text"
 
-# CLI commands to symlink into /usr/local/bin
-CLI_COMMANDS=(
-  "zettabrain"
-  "zettabrain-chat"
-  "zettabrain-ingest"
-  "zettabrain-setup"
-  "zettabrain-status"
-)
-
-# Ollama models to pull
-OLLAMA_LLM_MODEL="llama3.1:8b"
-OLLAMA_EMBED_MODEL="nomic-embed-text"
-
-# -------------------------------------------------------
-# COLOURS
-# -------------------------------------------------------
+# ── Colours ──────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -40,13 +22,10 @@ log()     { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE" 2>/dev/null ||
 info()    { echo -e "${CYAN}  →${NC} $*";  log "INFO  $*"; }
 success() { echo -e "${GREEN}  ✓${NC} $*"; log "OK    $*"; }
 warn()    { echo -e "${YELLOW}  !${NC} $*"; log "WARN  $*"; }
-error()   { echo -e "${RED}  ✗ ERROR:${NC} $*"; log "ERROR $*"; }
-die()     { error "$*"; echo ""; echo "  Check the log: ${LOG_FILE}"; exit 1; }
+die()     { echo -e "${RED}  ✗ ERROR:${NC} $*"; log "ERROR $*"; echo ""; exit 1; }
 step()    { echo ""; echo -e "${BOLD}${BLUE}[$1]${NC} $2"; }
 
-# -------------------------------------------------------
-# BANNER
-# -------------------------------------------------------
+# ── Banner ───────────────────────────────────────────────────
 clear 2>/dev/null || true
 echo ""
 echo -e "${BLUE}${BOLD}"
@@ -55,75 +34,55 @@ echo "  ║               ZettaBrain RAG                        ║"
 echo "  ║   Local private AI — your data stays on device      ║"
 echo "  ╚══════════════════════════════════════════════════════╝"
 echo -e "${NC}"
-echo -e "  Installing to: ${GREEN}${INSTALL_DIR}${NC}"
-echo -e "  CLI tools at : ${GREEN}${BIN_DIR}${NC}"
 echo ""
 
-# -------------------------------------------------------
-# ROOT CHECK
-# -------------------------------------------------------
+# ── Root check ───────────────────────────────────────────────
 if [ "$EUID" -ne 0 ]; then
-  die "This installer must be run as root.\nRun: curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/zettabrain-rag/main/install.sh | sudo bash"
+  die "This installer must be run as root.\n  Run: curl -fsSL https://zettabrain.app/install.sh | sudo bash"
 fi
 
-# -------------------------------------------------------
-# OS DETECTION
-# -------------------------------------------------------
-step "1/7" "Detecting operating system"
+mkdir -p /var/log
+
+# ── 1/4 OS detection ─────────────────────────────────────────
+step "1/4" "Detecting operating system"
 
 OS=""
 PKG_MANAGER=""
-
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   OS="${ID}"
 fi
 
 case "$OS" in
-  ubuntu|debian|linuxmint|pop)
-    PKG_MANAGER="apt"
-    ;;
+  ubuntu|debian|linuxmint|pop) PKG_MANAGER="apt" ;;
   amzn|rhel|centos|fedora|rocky|almalinux)
     PKG_MANAGER="yum"
-    command -v dnf &>/dev/null && PKG_MANAGER="dnf"
-    ;;
+    command -v dnf &>/dev/null && PKG_MANAGER="dnf" ;;
   *)
-    warn "Unrecognised OS: ${OS}. Attempting to continue..."
     command -v apt-get &>/dev/null && PKG_MANAGER="apt"
     command -v yum     &>/dev/null && PKG_MANAGER="yum"
-    command -v dnf     &>/dev/null && PKG_MANAGER="dnf"
-    ;;
+    command -v dnf     &>/dev/null && PKG_MANAGER="dnf" ;;
 esac
 
 [ -z "$PKG_MANAGER" ] && die "Cannot detect package manager. Supported: apt, yum, dnf."
-
 success "Detected: ${OS} (${PKG_MANAGER})"
 
-# -------------------------------------------------------
-# INSTALL SYSTEM DEPENDENCIES
-# -------------------------------------------------------
-step "2/7" "Installing system dependencies"
+# ── 2/4 System dependencies ──────────────────────────────────
+step "2/4" "Installing system dependencies"
 
-install_packages() {
+_pkg() {
   case "$PKG_MANAGER" in
-    apt)
-      apt-get update -qq
-      apt-get install -y -qq "$@"
-      ;;
-    yum|dnf)
-      "$PKG_MANAGER" install -y -q "$@"
-      ;;
+    apt)     apt-get install -y -qq "$@" >> "$LOG_FILE" 2>&1 ;;
+    yum|dnf) "$PKG_MANAGER" install -y -q "$@" >> "$LOG_FILE" 2>&1 ;;
   esac
 }
 
-# Python 3.10+ check
+# Find Python 3.9+
 PYTHON_BIN=""
 for py in python3.12 python3.11 python3.10 python3.9 python3; do
   if command -v "$py" &>/dev/null; then
-    PY_VERSION=$("$py" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-    PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
-    PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
-    if [ "$PY_MAJOR" -ge 3 ] && [ "$PY_MINOR" -ge 9 ]; then
+    PY_NUM=$("$py" -c "import sys; print(sys.version_info.major*10+sys.version_info.minor)" 2>/dev/null || echo 0)
+    if [ "$PY_NUM" -ge 39 ] 2>/dev/null; then
       PYTHON_BIN="$py"
       break
     fi
@@ -133,186 +92,87 @@ done
 if [ -z "$PYTHON_BIN" ]; then
   info "Installing Python 3.11..."
   case "$PKG_MANAGER" in
-    apt) install_packages python3.11 python3.11-venv python3.11-pip ;;
-    yum|dnf) install_packages python3.11 ;;
+    apt) apt-get update -qq >> "$LOG_FILE" 2>&1; _pkg python3.11 python3.11-venv python3-pip ;;
+    yum|dnf) _pkg python3.11 ;;
   esac
   PYTHON_BIN="python3.11"
 fi
 
-success "Python: $PYTHON_BIN ($("$PYTHON_BIN" --version))"
+success "Python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 
-# Required system packages
-info "Installing system packages..."
 case "$PKG_MANAGER" in
-  apt)
-    install_packages \
-      python3-venv \
-      python3-pip \
-      curl \
-      nfs-common \
-      netcat-openbsd \
-      git
-    ;;
-  yum|dnf)
-    install_packages \
-      python3-pip \
-      curl \
-      nfs-utils \
-      nmap-ncat \
-      git
-    ;;
+  apt) apt-get update -qq >> "$LOG_FILE" 2>&1; _pkg python3-pip python3-venv curl git ;;
+  yum|dnf) _pkg python3-pip curl git ;;
 esac
 
 success "System dependencies installed."
 
-# -------------------------------------------------------
-# CREATE INSTALL DIRECTORY
-# -------------------------------------------------------
-step "3/7" "Setting up ZettaBrain directory"
+# ── 3/4 Install ZettaBrain RAG via pipx ──────────────────────
+step "3/4" "Installing ZettaBrain RAG"
 
-mkdir -p "${INSTALL_DIR}"
-mkdir -p "${SRC_DIR}"
-mkdir -p /mnt/Rag-data
-mkdir -p /var/log
-
-success "Directories created."
-
-# -------------------------------------------------------
-# CREATE VIRTUAL ENVIRONMENT (hidden from user)
-# -------------------------------------------------------
-step "4/7" "Creating Python environment"
-
-if [ -d "${VENV_DIR}" ]; then
-  info "Existing environment found — upgrading..."
-  "${VENV_DIR}/bin/pip" install --quiet --upgrade pip
-else
-  info "Creating isolated Python environment..."
-  "$PYTHON_BIN" -m venv "${VENV_DIR}"
-  "${VENV_DIR}/bin/pip" install --quiet --upgrade pip
+# Install pipx if missing
+if ! command -v pipx &>/dev/null; then
+  info "Installing pipx..."
+  "$PYTHON_BIN" -m pip install --quiet --upgrade pipx >> "$LOG_FILE" 2>&1
+  "$PYTHON_BIN" -m pipx ensurepath >> "$LOG_FILE" 2>&1
+  export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+  hash -r 2>/dev/null || true
 fi
 
-VENV_PYTHON="${VENV_DIR}/bin/python3"
-VENV_PIP="${VENV_DIR}/bin/pip"
+# Install or upgrade
+if pipx list 2>/dev/null | grep -q "zettabrain-rag"; then
+  info "Upgrading zettabrain-rag to latest..."
+  pipx upgrade zettabrain-rag >> "$LOG_FILE" 2>&1
+else
+  info "Installing zettabrain-rag from PyPI..."
+  pipx install zettabrain-rag >> "$LOG_FILE" 2>&1
+fi
 
-success "Python environment ready."
-
-# -------------------------------------------------------
-# INSTALL ZETTABRAIN-RAG
-# -------------------------------------------------------
-step "5/7" "Installing zettabrain-rag"
-
-info "Downloading and installing latest zettabrain-rag..."
-"${VENV_PIP}" install --quiet --upgrade zettabrain-rag
-
-INSTALLED_VERSION=$("${VENV_DIR}/bin/zettabrain" --version 2>/dev/null || echo "unknown")
+INSTALLED_VERSION=$(zettabrain --version 2>/dev/null || pipx list 2>/dev/null | grep zettabrain | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "latest")
 success "Installed: ${INSTALLED_VERSION}"
 
-# Deploy bundled scripts from package to /opt/zettabrain/src
-info "Deploying RAG scripts to ${SRC_DIR}..."
-PKG_SCRIPTS=$(find "${VENV_DIR}" -path "*/zettabrain_rag/scripts" -type d 2>/dev/null | head -1)
-if [ -n "$PKG_SCRIPTS" ]; then
-  for script in 03_langchain_rag.py 05_ingest_documents.py 01_chromadb_setup.py 02_embeddings_test.py; do
-    if [ -f "${PKG_SCRIPTS}/${script}" ]; then
-      cp "${PKG_SCRIPTS}/${script}" "${SRC_DIR}/${script}"
-      chmod +x "${SRC_DIR}/${script}"
-      success "Deployed: ${script}"
-    fi
-  done
-else
-  warn "Could not locate package scripts — they will auto-deploy on first CLI run."
-fi
-
-# -------------------------------------------------------
-# SYMLINK CLI COMMANDS INTO /usr/local/bin
-# -------------------------------------------------------
-step "6/7" "Registering CLI commands"
-
-for cmd in "${CLI_COMMANDS[@]}"; do
-  TARGET="${VENV_DIR}/bin/${cmd}"
-  LINK="${BIN_DIR}/${cmd}"
-
-  if [ -f "$TARGET" ]; then
-    # Remove old symlink if exists
-    rm -f "$LINK"
-
-    # Create wrapper script (more robust than symlink for venv)
-    cat > "$LINK" << WRAPPER
-#!/bin/bash
-source "${VENV_DIR}/bin/activate"
-exec "${TARGET}" "\$@"
-WRAPPER
-    chmod +x "$LINK"
-    success "Registered: ${cmd}"
-  else
-    warn "Command not found in venv: ${cmd}"
-  fi
-done
-
-# -------------------------------------------------------
-# INSTALL OLLAMA
-# -------------------------------------------------------
-step "7/7" "Installing Ollama"
+# ── 4/4 Install Ollama ───────────────────────────────────────
+step "4/4" "Installing Ollama + embedding model"
 
 if command -v ollama &>/dev/null; then
-  OLLAMA_VERSION=$(ollama --version 2>/dev/null || echo "unknown")
-  info "Ollama already installed: ${OLLAMA_VERSION}"
+  info "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"
 else
   info "Installing Ollama..."
   curl -fsSL https://ollama.com/install.sh | sh >> "$LOG_FILE" 2>&1
   success "Ollama installed."
 fi
 
-# Start Ollama service
-if systemctl is-active --quiet ollama 2>/dev/null; then
-  info "Ollama service already running."
-else
+systemctl enable ollama >> "$LOG_FILE" 2>&1 || true
+if ! systemctl is-active --quiet ollama 2>/dev/null; then
   info "Starting Ollama service..."
-  systemctl enable ollama >> "$LOG_FILE" 2>&1 || true
-  systemctl start  ollama >> "$LOG_FILE" 2>&1 || true
+  systemctl start ollama >> "$LOG_FILE" 2>&1 || true
   sleep 3
 fi
 
-# Pull models
-info "Pulling embedding model: ${OLLAMA_EMBED_MODEL}"
-info "(This downloads ~275MB — please wait)"
-ollama pull "${OLLAMA_EMBED_MODEL}" 2>&1 | tail -1
+info "Pulling embedding model: ${EMBED_MODEL} (~275MB)..."
+ollama pull "$EMBED_MODEL" 2>&1 | tail -1
+success "Embedding model ready."
 
-echo ""
-echo -e "  ${YELLOW}Skipping LLM model pull (${OLLAMA_LLM_MODEL} is 4.9GB)."
-echo -e "  Pull it manually when ready:${NC}"
-echo -e "  ${CYAN}ollama pull ${OLLAMA_LLM_MODEL}${NC}"
-
-# -------------------------------------------------------
-# WRITE SHELL PROFILE (optional convenience)
-# -------------------------------------------------------
-PROFILE_LINE="export PATH=\"${BIN_DIR}:\$PATH\""
-for profile in /root/.bashrc /home/*/.bashrc; do
-  [ -f "$profile" ] || continue
-  grep -qF "$BIN_DIR" "$profile" 2>/dev/null || echo "$PROFILE_LINE" >> "$profile"
-done
-
-# -------------------------------------------------------
-# DONE
-# -------------------------------------------------------
+# ── Done ─────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}${BOLD}"
 echo "  ╔══════════════════════════════════════════════════════╗"
 echo "  ║         ZettaBrain RAG installed successfully!       ║"
 echo "  ╚══════════════════════════════════════════════════════╝"
 echo -e "${NC}"
-echo -e "  Install dir : ${GREEN}${INSTALL_DIR}${NC}"
-echo -e "  Python env  : ${GREEN}${VENV_DIR}${NC}"
-echo -e "  Log file    : ${GREEN}${LOG_FILE}${NC}"
+echo -e "  Version  : ${GREEN}${INSTALLED_VERSION}${NC}"
+echo -e "  Log file : ${GREEN}${LOG_FILE}${NC}"
 echo ""
 echo -e "${BOLD}  Next steps:${NC}"
 echo ""
-echo -e "  1. Pull the LLM model (4.9GB):"
-echo -e "     ${CYAN}ollama pull ${OLLAMA_LLM_MODEL}${NC}"
-echo ""
-echo -e "  2. Mount your NFS document store:"
+echo -e "  1. Run setup — storage, TLS, and model selection:"
 echo -e "     ${CYAN}sudo zettabrain-setup${NC}"
 echo ""
-echo -e "  3. Start chatting:"
+echo -e "  2. Launch the secure web GUI:"
+echo -e "     ${CYAN}zettabrain-server${NC}"
+echo -e "     Open: ${CYAN}https://local.zettabrain.app:7860${NC}"
+echo ""
+echo -e "  3. Or start the CLI chat:"
 echo -e "     ${CYAN}zettabrain-chat${NC}"
 echo ""
 
