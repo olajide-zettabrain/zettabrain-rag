@@ -43,8 +43,8 @@ fi
 
 mkdir -p /var/log
 
-# ── 1/4 OS detection ─────────────────────────────────────────
-step "1/4" "Detecting operating system"
+# ── 1/5 OS detection ─────────────────────────────────────────
+step "1/5" "Detecting operating system"
 
 OS=""
 PKG_MANAGER=""
@@ -67,8 +67,8 @@ esac
 [ -z "$PKG_MANAGER" ] && die "Cannot detect package manager. Supported: apt, yum, dnf."
 success "Detected: ${OS} (${PKG_MANAGER})"
 
-# ── 2/4 System dependencies ──────────────────────────────────
-step "2/4" "Installing system dependencies"
+# ── 2/5 System dependencies ──────────────────────────────────
+step "2/5" "Installing system dependencies"
 
 _pkg() {
   case "$PKG_MANAGER" in
@@ -107,8 +107,101 @@ esac
 
 success "System dependencies installed."
 
-# ── 3/4 Install ZettaBrain RAG via pipx ──────────────────────
-step "3/4" "Installing ZettaBrain RAG"
+# ── 3/5 NVIDIA drivers ───────────────────────────────────────
+# Installed unconditionally so Ollama detects the GPU on first install.
+# If no NVIDIA hardware is present the packages install harmlessly.
+step "3/5" "Installing NVIDIA drivers"
+
+if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
+  _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+  success "NVIDIA drivers already active: ${_gpu_name}"
+else
+  info "Installing NVIDIA GPU drivers (ensures GPU is usable regardless of instance type)..."
+  _nvidia_reboot=false
+
+  case "$PKG_MANAGER" in
+    apt)
+      # Ubuntu / Debian — ubuntu-drivers autoinstall picks the correct version
+      apt-get install -y -qq pciutils >> "$LOG_FILE" 2>&1 || true
+      apt-get install -y -qq "linux-headers-$(uname -r)" 2>/dev/null \
+        || apt-get install -y -qq linux-headers-generic >> "$LOG_FILE" 2>&1 || true
+      apt-get install -y -qq ubuntu-drivers-common >> "$LOG_FILE" 2>&1 || true
+
+      if command -v ubuntu-drivers &>/dev/null; then
+        info "Running ubuntu-drivers autoinstall (this may take a few minutes)..."
+        ubuntu-drivers autoinstall >> "$LOG_FILE" 2>&1 \
+          || apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
+      else
+        apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
+      fi
+      _nvidia_reboot=true
+      ;;
+
+    yum|dnf)
+      # Amazon Linux / RHEL / CentOS / Fedora — use NVIDIA CUDA repo
+      _os_id="" _os_ver=""
+      [ -f /etc/os-release ] && { . /etc/os-release; _os_id="${ID}"; _os_ver="${VERSION_ID}"; }
+
+      # Kernel headers (needed for DKMS driver build)
+      "$PKG_MANAGER" install -y "kernel-devel-$(uname -r)" "kernel-headers-$(uname -r)" \
+        >> "$LOG_FILE" 2>&1 \
+        || "$PKG_MANAGER" install -y kernel-devel kernel-headers >> "$LOG_FILE" 2>&1 || true
+      "$PKG_MANAGER" install -y pciutils >> "$LOG_FILE" 2>&1 || true
+
+      _cuda_repo=""
+      case "${_os_id}" in
+        amzn)
+          case "${_os_ver}" in
+            2)    _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo" ;;
+            202*) _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo" ;;
+          esac ;;
+        rhel|centos|rocky|almalinux)
+          _major="${_os_ver%%.*}"
+          _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel${_major}/x86_64/cuda-rhel${_major}.repo" ;;
+        fedora)
+          _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora${_os_ver}/x86_64/cuda-fedora${_os_ver}.repo" ;;
+      esac
+
+      if [ -n "$_cuda_repo" ]; then
+        info "Adding NVIDIA CUDA repository..."
+        if command -v dnf &>/dev/null; then
+          dnf config-manager --add-repo "$_cuda_repo" >> "$LOG_FILE" 2>&1 || true
+          dnf clean expire-cache >> "$LOG_FILE" 2>&1 || true
+          info "Installing cuda-drivers (this may take several minutes)..."
+          dnf module install -y "nvidia-driver:latest-dkms" >> "$LOG_FILE" 2>&1 \
+            || dnf install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
+        else
+          yum-config-manager --add-repo "$_cuda_repo" >> "$LOG_FILE" 2>&1 || true
+          yum clean expire-cache >> "$LOG_FILE" 2>&1 || true
+          info "Installing cuda-drivers (this may take several minutes)..."
+          yum install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
+        fi
+      else
+        warn "Unrecognised OS (${_os_id} ${_os_ver}) — skipping NVIDIA repo setup."
+        warn "Install drivers manually: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/"
+      fi
+      _nvidia_reboot=true
+      ;;
+  esac
+
+  # Attempt to load the kernel module so Ollama (installed next) sees the GPU
+  modprobe nvidia >> "$LOG_FILE" 2>&1 || true
+  sleep 2
+
+  if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
+    _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+    success "NVIDIA drivers active — GPU detected: ${_gpu_name}"
+  elif $_nvidia_reboot; then
+    warn "NVIDIA drivers installed — a reboot is required to activate the kernel module."
+    warn "After reboot, Ollama will detect the GPU automatically."
+    warn "  → Installation continues; Ollama will run on CPU until you reboot."
+  else
+    warn "NVIDIA driver installation may not have completed. Check: ${LOG_FILE}"
+  fi
+fi
+
+# ── 4/5 Install ZettaBrain RAG via pipx ──────────────────────
+step "4/5" "Installing ZettaBrain RAG"
 
 # Ensure pipx is available — prefer the apt/system version installed above;
 # fall back to pip with --break-system-packages for Ubuntu 23.04+ / Debian 12+
@@ -202,8 +295,8 @@ echo ""
 success "ZettaBrain RAG installed: ${INSTALLED_VERSION}"
 info  "Commands available globally in /usr/local/bin"
 
-# ── 4/4 Install Ollama ───────────────────────────────────────
-step "4/4" "Installing Ollama + embedding model"
+# ── 5/5 Install Ollama ───────────────────────────────────────
+step "5/5" "Installing Ollama + embedding model"
 
 if command -v ollama &>/dev/null; then
   info "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"

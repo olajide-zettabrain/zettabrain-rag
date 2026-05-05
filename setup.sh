@@ -82,7 +82,7 @@ echo ""
 # -------------------------------------------------------
 # STEP 1/5 — SELECT PRIMARY STORAGE TYPE
 # -------------------------------------------------------
-step "Step 1/5: Select Primary Storage Type"
+step "Step 1/6: Select Primary Storage Type"
 echo ""
 echo -e "  Where are your documents stored?\n"
 echo -e "  ${BOLD}1)${NC} Local storage  — documents are on this machine"
@@ -393,9 +393,108 @@ if [ "$STORAGE_TYPE" = "smb" ]; then
 fi
 
 # ================================================================
-# STEP 2/5 — INSTALL OLLAMA
+# STEP 2/6 — NVIDIA DRIVERS
+# Installed unconditionally so Ollama (step 3) detects the GPU.
+# Safe to run when no NVIDIA hardware is present.
 # ================================================================
-step "Step 2/5: Installing Ollama"
+step "Step 2/6: Installing NVIDIA drivers"
+
+# Detect package manager
+_PM=""
+command -v apt-get &>/dev/null && _PM="apt"
+command -v dnf     &>/dev/null && _PM="dnf"
+command -v yum     &>/dev/null && _PM="${_PM:-yum}"
+
+if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
+  _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+  success "NVIDIA drivers already active: ${_gpu_name}"
+elif [ -z "$_PM" ]; then
+  warn "Cannot detect package manager — skipping NVIDIA driver install."
+  warn "Install manually: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/"
+else
+  info "Installing NVIDIA GPU drivers (ensures GPU is usable with Ollama)..."
+  _nvidia_reboot=false
+
+  case "$_PM" in
+    apt)
+      apt-get install -y -qq pciutils >> "$LOG_FILE" 2>&1 || true
+      apt-get install -y -qq "linux-headers-$(uname -r)" 2>/dev/null \
+        || apt-get install -y -qq linux-headers-generic >> "$LOG_FILE" 2>&1 || true
+      apt-get install -y -qq ubuntu-drivers-common >> "$LOG_FILE" 2>&1 || true
+
+      if command -v ubuntu-drivers &>/dev/null; then
+        info "Running ubuntu-drivers autoinstall (this may take a few minutes)..."
+        ubuntu-drivers autoinstall >> "$LOG_FILE" 2>&1 \
+          || apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
+      else
+        apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
+      fi
+      _nvidia_reboot=true
+      ;;
+
+    yum|dnf)
+      _os_id="" _os_ver=""
+      [ -f /etc/os-release ] && { . /etc/os-release; _os_id="${ID}"; _os_ver="${VERSION_ID}"; }
+
+      "$_PM" install -y "kernel-devel-$(uname -r)" "kernel-headers-$(uname -r)" \
+        >> "$LOG_FILE" 2>&1 \
+        || "$_PM" install -y kernel-devel kernel-headers >> "$LOG_FILE" 2>&1 || true
+      "$_PM" install -y pciutils >> "$LOG_FILE" 2>&1 || true
+
+      _cuda_repo=""
+      case "${_os_id}" in
+        amzn)
+          case "${_os_ver}" in
+            2)    _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo" ;;
+            202*) _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo" ;;
+          esac ;;
+        rhel|centos|rocky|almalinux)
+          _major="${_os_ver%%.*}"
+          _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel${_major}/x86_64/cuda-rhel${_major}.repo" ;;
+        fedora)
+          _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora${_os_ver}/x86_64/cuda-fedora${_os_ver}.repo" ;;
+      esac
+
+      if [ -n "$_cuda_repo" ]; then
+        info "Adding NVIDIA CUDA repository..."
+        if command -v dnf &>/dev/null; then
+          dnf config-manager --add-repo "$_cuda_repo" >> "$LOG_FILE" 2>&1 || true
+          dnf clean expire-cache >> "$LOG_FILE" 2>&1 || true
+          info "Installing cuda-drivers (this may take several minutes)..."
+          dnf module install -y "nvidia-driver:latest-dkms" >> "$LOG_FILE" 2>&1 \
+            || dnf install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
+        else
+          yum-config-manager --add-repo "$_cuda_repo" >> "$LOG_FILE" 2>&1 || true
+          yum clean expire-cache >> "$LOG_FILE" 2>&1 || true
+          info "Installing cuda-drivers (this may take several minutes)..."
+          yum install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
+        fi
+      else
+        warn "Unrecognised OS (${_os_id} ${_os_ver}) — skipping NVIDIA repo setup."
+      fi
+      _nvidia_reboot=true
+      ;;
+  esac
+
+  modprobe nvidia >> "$LOG_FILE" 2>&1 || true
+  sleep 2
+
+  if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
+    _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+    success "NVIDIA drivers active — GPU detected: ${_gpu_name}"
+  elif $_nvidia_reboot; then
+    warn "NVIDIA drivers installed — reboot required to activate the kernel module."
+    warn "After reboot, run: sudo systemctl restart ollama"
+    warn "  → Continuing; Ollama will use CPU until reboot."
+  else
+    warn "NVIDIA driver install may not have completed. Check: ${LOG_FILE}"
+  fi
+fi
+
+# ================================================================
+# STEP 3/6 — INSTALL OLLAMA
+# ================================================================
+step "Step 3/6: Installing Ollama"
 
 if command -v ollama &>/dev/null; then
   info "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"
@@ -438,7 +537,7 @@ fi
 # ================================================================
 # STEP 3/5 — PULL AI MODELS
 # ================================================================
-step "Step 3/5: Pulling required AI models"
+step "Step 4/6: Pulling required AI models"
 
 # Embedding model — required, small (~275MB)
 if ollama list 2>/dev/null | grep -q "^${EMBED_MODEL}"; then
@@ -614,7 +713,7 @@ success "Storage registry saved: ${STORAGE_CONFIG}"
 # ================================================================
 # STEP 4/5 — TLS CERTIFICATE (bundled)
 # ================================================================
-step "Step 4/5: TLS certificate"
+step "Step 5/6: TLS certificate"
 
 # Locate the cert bundled inside the installed package
 PKG_CERT=""
@@ -640,7 +739,7 @@ fi
 # ================================================================
 # STEP 5/5 — BUILD RAG VECTOR STORE
 # ================================================================
-step "Step 5/5: Building RAG vector store"
+step "Step 6/6: Building RAG vector store"
 
 # Find Python that has langchain installed
 PYTHON_BIN=""
