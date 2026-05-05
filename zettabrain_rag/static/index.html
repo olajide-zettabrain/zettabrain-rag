@@ -167,6 +167,16 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 
+  /* ── Markdown inside answer bubbles ──────────────── */
+  .msg.assistant .msg-bubble p { margin-bottom: 0.6em; }
+  .msg.assistant .msg-bubble p:last-child { margin-bottom: 0; }
+  .msg.assistant .msg-bubble ul,
+  .msg.assistant .msg-bubble ol { padding-left: 1.4em; margin-bottom: 0.6em; }
+  .msg.assistant .msg-bubble li { margin-bottom: 0.25em; }
+  .msg.assistant .msg-bubble strong { color: var(--text); font-weight: 600; }
+  .msg.assistant .msg-bubble em { font-style: italic; }
+  .msg.assistant .msg-bubble code { background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-family: 'Courier New', monospace; font-size: 12px; }
+
   /* ── Spinner ──────────────────────────────────── */
   .spinner { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -361,6 +371,8 @@ let ws = null;
 let isStreaming = false;
 let currentModel = '';
 let status = {};
+let currentSources = [];   // buffered until streaming ends
+let currentAnswer  = '';   // accumulated token text for markdown render
 
 // ── Init ─────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -388,7 +400,7 @@ function connectWS() {
 
 function handleWSMessage(data) {
   if (data.type === 'sources') {
-    renderSources(data.sources);
+    currentSources = data.sources || [];  // buffer — rendered after streaming ends
   } else if (data.type === 'token') {
     appendToken(data.token);
   } else if (data.type === 'done') {
@@ -519,9 +531,8 @@ async function sendMessage() {
       const data = await r.json();
       if (!r.ok) throw new Error(data.detail || 'Request failed');
 
-      const bubble = document.querySelector(`#${assistantId} .msg-bubble`);
-      if (bubble) bubble.textContent = data.answer;
-      renderSources(data.sources, assistantId);
+      currentAnswer  = data.answer || '';
+      currentSources = data.sources || [];
       finishStreaming(data);
     } catch(e) {
       const bubble = document.querySelector(`#${assistantId} .msg-bubble`);
@@ -562,18 +573,16 @@ function appendToken(token) {
   const bubble = document.querySelector(`#${currentMsgId} .msg-bubble`);
   if (!bubble) return;
 
-  // Remove cursor if present
+  currentAnswer += token;
+
+  // Remove cursor, update text, restore cursor
   const cursor = bubble.querySelector('.cursor');
   if (cursor) cursor.remove();
-
-  bubble.textContent += token;
-
-  // Add cursor back
+  bubble.textContent = currentAnswer;
   const cur = document.createElement('span');
   cur.className = 'cursor';
   bubble.appendChild(cur);
 
-  // Scroll
   document.getElementById('chat-area').scrollTop = 999999;
 }
 
@@ -582,15 +591,20 @@ function renderSources(sources, msgId) {
   const id = msgId || currentMsgId;
   if (!id) return;
 
-  const meta = document.getElementById(id + '-meta');
-  if (!meta) return;
+  // Deduplicate by filename — one chip per unique file
+  const seen = new Set();
+  const unique = sources.filter(s => {
+    if (seen.has(s.filename)) return false;
+    seen.add(s.filename);
+    return true;
+  });
 
   const chips = document.createElement('div');
   chips.className = 'source-chips';
-  sources.forEach(s => {
+  unique.forEach(s => {
     const chip = document.createElement('div');
     chip.className = 'chip';
-    chip.textContent = '📄 ' + s.filename + (s.page ? ` p.${s.page}` : '');
+    chip.textContent = '📄 ' + s.filename;
     chip.onclick = () => showSourceModal(s);
     chips.appendChild(chip);
   });
@@ -603,10 +617,17 @@ function finishStreaming(data) {
   isStreaming = false;
   setSendDisabled(false);
 
-  // Remove cursor
   if (currentMsgId) {
-    const cursor = document.querySelector(`#${currentMsgId} .cursor`);
-    if (cursor) cursor.remove();
+    const bubble = document.querySelector(`#${currentMsgId} .msg-bubble`);
+    if (bubble) {
+      // Render accumulated answer as markdown HTML
+      bubble.innerHTML = mdToHtml(currentAnswer);
+    }
+
+    // Render deduplicated source chips below the bubble
+    if (currentSources.length > 0) {
+      renderSources(currentSources, currentMsgId);
+    }
 
     // Add model info + timing to meta
     if (data && data.model) {
@@ -626,6 +647,10 @@ function finishStreaming(data) {
     }
   }
 
+  // Reset per-message state
+  currentAnswer  = '';
+  currentSources = [];
+
   document.getElementById('chat-input').focus();
 }
 
@@ -635,6 +660,52 @@ function setSendDisabled(disabled) {
   btn.disabled = disabled;
   input.disabled = disabled;
   btn.innerHTML = disabled ? '<div class="spinner" style="width:16px;height:16px;border-width:2px;border-top-color:#fff"></div>' : '➤';
+}
+
+// ── Markdown renderer (lightweight, no deps) ──────────
+function mdToHtml(text) {
+  if (!text) return '';
+  // Escape HTML entities first
+  let s = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // Fenced code blocks
+  s = s.replace(/```[\s\S]*?```/g, m => {
+    const inner = m.slice(3, -3).replace(/^\w*\n/, '');
+    return `<pre><code>${inner}</code></pre>`;
+  });
+
+  // Inline code
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // Bold + italic
+  s = s.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+
+  // Unordered lists (lines starting with - or *)
+  s = s.replace(/((?:^[ \t]*[-*][ \t].+\n?)+)/gm, block => {
+    const items = block.trim().split('\n').map(l => `<li>${l.replace(/^[ \t]*[-*][ \t]/, '').trim()}</li>`).join('');
+    return `<ul>${items}</ul>`;
+  });
+
+  // Ordered lists
+  s = s.replace(/((?:^[ \t]*\d+\.[ \t].+\n?)+)/gm, block => {
+    const items = block.trim().split('\n').map(l => `<li>${l.replace(/^[ \t]*\d+\.[ \t]/, '').trim()}</li>`).join('');
+    return `<ol>${items}</ol>`;
+  });
+
+  // Paragraphs — wrap double-newline-separated blocks not already wrapped in tags
+  s = s.split(/\n{2,}/).map(para => {
+    para = para.trim();
+    if (!para) return '';
+    if (/^<(ul|ol|pre|li)/.test(para)) return para;
+    return `<p>${para.replace(/\n/g, '<br>')}</p>`;
+  }).join('');
+
+  return s;
 }
 
 // ── Ingest ────────────────────────────────────────────
