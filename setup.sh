@@ -776,16 +776,17 @@ if [ -z "$PYTHON_BIN" ]; then
   done
 fi
 
+INGEST_SCRIPT="${DEPLOY_DIR}/05_ingest_documents.py"
 DOC_COUNT=0
 
 if [ -z "$PYTHON_BIN" ]; then
   warn "No Python with langchain found. Build the vector store manually:"
   warn "  find /root/.local/share/pipx/venvs/zettabrain-rag -name 'python*' -type f | head -3"
-  warn "  <python_path> ${RAG_SCRIPT} --rebuild"
+  warn "  zettabrain-ingest"
 
-elif [ ! -f "$RAG_SCRIPT" ]; then
-  warn "RAG script not deployed yet at: ${RAG_SCRIPT}"
-  warn "Run: zettabrain-chat --rebuild"
+elif [ ! -f "$INGEST_SCRIPT" ]; then
+  warn "Ingest script not deployed yet at: ${INGEST_SCRIPT}"
+  warn "Run: zettabrain-ingest"
 
 else
   DOC_COUNT=$(find "$PRIMARY_PATH" \
@@ -794,20 +795,22 @@ else
 
   if [ "$DOC_COUNT" -eq 0 ]; then
     warn "No documents found in ${PRIMARY_PATH}."
-    warn "Add documents then run: zettabrain-ingest --rebuild"
+    warn "Add documents then run: zettabrain-ingest"
   else
-    info "Found ${DOC_COUNT} document(s) — building vector store..."
+    info "Found ${DOC_COUNT} document(s) — building vector store via ingest script..."
     echo ""
     cd "$DEPLOY_DIR" || true
 
-    if ZETTABRAIN_DOCS="$PRIMARY_PATH" "$PYTHON_BIN" "$RAG_SCRIPT" --rebuild; then
+    # Use the ingest script (not the chat/RAG script) so chunking is consistent
+    # with subsequent `zettabrain-ingest` runs and duplicates are avoided.
+    if ZETTABRAIN_DOCS="$PRIMARY_PATH" "$PYTHON_BIN" "$INGEST_SCRIPT"; then
       echo ""
       success "Vector store built successfully."
       log "RAG build complete. Path: ${PRIMARY_PATH} | Docs: ${DOC_COUNT}"
     else
       echo ""
-      warn "RAG build failed. Run manually once documents are in place:"
-      warn "  ZETTABRAIN_DOCS=${PRIMARY_PATH} ${PYTHON_BIN} ${RAG_SCRIPT} --rebuild"
+      warn "Vector store build failed. Run manually once documents are in place:"
+      warn "  zettabrain-ingest"
     fi
   fi
 fi

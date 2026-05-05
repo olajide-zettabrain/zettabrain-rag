@@ -162,6 +162,16 @@ def get_vectorstore(chunks=None, force_rebuild=False):
         embedding_function=embeddings,
         collection_name="zettabrain_docs"
     )
+    # Always clear before rebuild so ingest+chat don't create duplicate embeddings
+    try:
+        vs._client.delete_collection("zettabrain_docs")
+        vs = Chroma(
+            persist_directory=CHROMA_PATH,
+            embedding_function=embeddings,
+            collection_name="zettabrain_docs"
+        )
+    except Exception:
+        pass
     batches = range(0, len(chunks), EMBED_BATCH)
     if _HAS_TQDM:
         batches = tqdm(batches, desc="  Progress", unit="batch",
