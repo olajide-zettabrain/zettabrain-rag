@@ -68,8 +68,9 @@ RAG_PROMPT = """You are ZettaBrain, an expert assistant that answers questions f
 Rules:
 - Answer ONLY from the CONTEXT provided. Do not use outside knowledge.
 - After each key fact, cite the source filename in brackets, e.g. [report.pdf].
+- If the query is a single word, acronym, or short topic (e.g. "AWS", "NFS", "RAG"), treat it as "give me an overview of this topic" and summarise everything the context says about it.
 - If the context partially answers the question, give what you can and note the gap.
-- If the context has no relevant information, say: "This topic is not covered in the current document library."
+- If the context has no relevant information at all, say: "I don't have information about this topic in the document library."
 - Be concise but complete. Use bullet points for multi-part answers.
 
 CONTEXT:
@@ -134,38 +135,77 @@ def rebuild_bm25_index(vectorstore) -> int:
         return 0
 
 
+# ── query normalisation ───────────────────────────────────────────────────────
+# Words that carry no topical signal in short question queries.
+_QUESTION_STOPWORDS = frozenset({
+    "what", "is", "are", "was", "were", "be", "been", "being",
+    "how", "does", "do", "did", "can", "could", "would", "should",
+    "the", "a", "an", "of", "in", "to", "for", "and", "or", "not",
+    "with", "about", "explain", "describe", "tell", "me", "give",
+    "show", "define", "meaning", "please", "help", "understand",
+    "overview", "summary", "summarise", "summarize",
+})
+
+
+def _core_terms(question: str) -> str | None:
+    """
+    Strip question words from short queries to produce a keyword-search-
+    friendly core.  Returns None when nothing useful was stripped (e.g. the
+    query is already a bare keyword, or is long enough to be self-describing).
+
+    Examples
+    --------
+    "What is AWS?"              → "aws"
+    "How does NFS work?"        → "nfs work"
+    "Amazon Web Services"       → None  (no stopwords removed)
+    "Explain deep learning"     → "deep learning"
+    "What are the key features of ChromaDB and vector databases?" → None (>8 words)
+    """
+    words = question.lower().translate(str.maketrans("", "", "?!.,;:\"'")).split()
+    if len(words) > 8:
+        return None  # long queries are specific enough already
+    core = [w for w in words if w not in _QUESTION_STOPWORDS and len(w) > 1]
+    if not core or set(core) == set(words):
+        return None  # nothing useful was stripped
+    return " ".join(core)
+
+
 # ── hybrid retrieval ──────────────────────────────────────────────────────────
 def hybrid_retrieve(question: str, vectorstore, top_k: int = 5) -> list:
     """
     Retrieve the top_k most relevant chunks for a question.
 
-    1. MMR semantic search  — fetch 25 candidates, return 6 (relevance-focused)
-    2. BM25 keyword search  — fetch 8 candidates
-    3. Deduplicate by content hash
-    4. Re-rank with FlashRank cross-encoder → return top_k
+    1. MMR semantic search  — fetch 30 candidates, return 6 (relevance-focused)
+    2. BM25 keyword search  — fetch 10 candidates with original question
+    3. BM25 keyword search  — fetch 8 candidates with core terms only
+       (strips question words so "What is AWS?" → "aws" → hits the right doc)
+    4. Deduplicate by content hash
+    5. Re-rank with FlashRank cross-encoder → return top_k
 
     MMR tuning: lambda_mult=0.82 keeps results tightly on-topic.
-    Lower values (0.5-0.65) maximise diversity but scatter context across
-    many documents, causing the LLM to report topics as "not covered."
     """
     # 1. semantic (MMR) — relevance-first, modest diversity
     semantic = vectorstore.as_retriever(
         search_type="mmr",
-        search_kwargs={"k": 6, "fetch_k": 25, "lambda_mult": 0.82},
+        search_kwargs={"k": 6, "fetch_k": 30, "lambda_mult": 0.82},
     ).invoke(question)
 
-    # 2. keyword (BM25)
-    keyword = _bm25_search(question, k=8)
+    # 2. BM25 with original question
+    keyword = _bm25_search(question, k=10)
 
-    # 3. merge + deduplicate (semantic results ranked first)
+    # 3. BM25 with core terms (handles acronym / stopword-heavy questions)
+    core = _core_terms(question)
+    keyword_core = _bm25_search(core, k=8) if core else []
+
+    # 4. merge + deduplicate (semantic results ranked first)
     seen, merged = set(), []
-    for doc in semantic + keyword:
+    for doc in semantic + keyword + keyword_core:
         key = hashlib.md5(doc.page_content.encode()).hexdigest()
         if key not in seen:
             seen.add(key)
             merged.append(doc)
 
-    # 4. re-rank
+    # 5. re-rank with original question so relevance judgement is correct
     if _HAS_RERANKER and len(merged) > top_k:
         try:
             passages = [{"id": i, "text": d.page_content} for i, d in enumerate(merged)]
