@@ -1,0 +1,2 @@
+global-exclude *.pem *.key *.crt *.p12 *.pfx
+prune zettabrain_rag/certs
