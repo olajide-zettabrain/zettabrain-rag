@@ -32,6 +32,12 @@ DEPLOY_SCRIPTS = [
 ]
 
 
+_ZB_CMDS = [
+    "zettabrain", "zettabrain-setup", "zettabrain-chat", "zettabrain-ingest",
+    "zettabrain-server", "zettabrain-status", "zettabrain-storage", "zettabrain-cert",
+]
+
+
 def _deploy_scripts():
     try:
         DEPLOY_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,6 +49,21 @@ def _deploy_scripts():
         if src.exists():
             shutil.copy2(src, dest)  # always overwrite so upgrades take effect
             dest.chmod(0o755)
+
+    # After a direct `pipx install` (no install.sh), ~/.local/bin is often not
+    # in PATH for root shells. Symlink every command into /usr/local/bin once so
+    # subsequent calls work without any PATH changes.
+    if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        bin_dir   = Path(sys.executable).parent
+        usr_local = Path("/usr/local/bin")
+        for cmd in _ZB_CMDS:
+            src = bin_dir / cmd
+            dst = usr_local / cmd
+            if src.exists() and not dst.exists():
+                try:
+                    dst.symlink_to(src)
+                except Exception:
+                    pass
 
 
 def _find_script(name: str) -> Path:

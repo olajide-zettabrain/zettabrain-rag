@@ -24,18 +24,26 @@ except ImportError:
     _HAS_BM25 = False
 
 try:
-    import os as _os, sys as _sys
-    # Suppress onnxruntime DRM/GPU device warnings on headless servers
+    import io as _io, os as _os, sys as _sys
+    # Suppress onnxruntime C++ warnings (write to OS fd 2) and Python logging noise.
+    # Strategy: redirect Python sys.stderr to StringIO (so any logging.StreamHandler
+    # installed during import has a live buffer, not a file that gets closed later),
+    # AND dup fd 2 to /dev/null (so C++ code writing directly to stderr is silenced).
     _os.environ.setdefault("ORT_LOGGING_LEVEL", "3")  # 3 = ERROR only
     _saved_stderr = _sys.stderr
-    _sys.stderr = open(_os.devnull, "w")
+    _sys.stderr = _io.StringIO()        # Python logging → buffer, never closed
+    _saved_fd2  = _os.dup(2)            # save real OS-level stderr fd
+    _devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
+    _os.dup2(_devnull_fd, 2)            # C++ writes → /dev/null
+    _os.close(_devnull_fd)
     try:
         from flashrank import Ranker, RerankRequest
         _ranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="/tmp/flashrank")
         _HAS_RERANKER = True
     finally:
-        _sys.stderr.close()
-        _sys.stderr = _saved_stderr
+        _os.dup2(_saved_fd2, 2)         # restore OS-level stderr
+        _os.close(_saved_fd2)
+        _sys.stderr = _saved_stderr     # restore Python stderr (StringIO left open — safe)
 except Exception:
     _ranker = None
     _HAS_RERANKER = False
