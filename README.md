@@ -1,8 +1,8 @@
 # ZettaBrain RAG
 
-**Local private RAG pipeline — your documents, your hardware, zero cloud.**
+**Private AI document assistant — your documents, your hardware, zero cloud.**
 
-Chat with your documents using a fully local AI. No API keys. No data leaving your machine. Runs on your own server or laptop with a secure HTTPS web GUI.
+Chat with your documents using a fully local AI. No API keys. No data leaving your machine. Runs on your own server or laptop with a secure HTTPS web GUI. Supports local disk, NFS, SMB and object storage.
 
 ---
 
