@@ -711,29 +711,33 @@ STEOF
 success "Storage registry saved: ${STORAGE_CONFIG}"
 
 # ================================================================
-# STEP 4/5 — TLS CERTIFICATE (bundled)
+# STEP 5/6 — TLS CERTIFICATE (self-signed via openssl)
 # ================================================================
 step "Step 5/6: TLS certificate"
 
-# Locate the cert bundled inside the installed package
-PKG_CERT=""
-for _venv in \
-    /root/.local/share/pipx/venvs/zettabrain-rag \
-    /home/*/.local/share/pipx/venvs/zettabrain-rag; do
-  _c="${_venv}/lib/python*/site-packages/zettabrain_rag/certs/cert.pem"
-  _k="${_venv}/lib/python*/site-packages/zettabrain_rag/certs/key.pem"
-  for _cf in $_c; do
-    [ -f "$_cf" ] && PKG_CERT="$_cf" && break 2
-  done
-done
+mkdir -p "$CERT_DIR"
+chmod 700 "$CERT_DIR"
 
-if [ -n "$PKG_CERT" ]; then
-  success "Bundled TLS certificate found — HTTPS enabled automatically."
-  info  "Access the GUI at: https://local.zettabrain.app:7860"
+if [ -f "$CERT_DIR/cert.pem" ] && [ -f "$CERT_DIR/key.pem" ]; then
+  success "TLS certificate already present at $CERT_DIR"
+elif command -v openssl &>/dev/null; then
+  info "Generating self-signed TLS certificate (valid 10 years)..."
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+    -keyout "$CERT_DIR/key.pem" \
+    -out    "$CERT_DIR/cert.pem" \
+    -days 3650 -nodes \
+    -subj "/CN=local.zettabrain.app" \
+    -addext "subjectAltName=DNS:local.zettabrain.app,DNS:localhost,IP:127.0.0.1" \
+    2>/dev/null
+  chmod 600 "$CERT_DIR/key.pem"
+  chmod 644 "$CERT_DIR/cert.pem"
+  success "Self-signed certificate generated at $CERT_DIR"
+  info    "Browser will show a one-time warning — this is normal for self-signed certs."
+  info    "For a trusted certificate run: sudo zettabrain-cert --letsencrypt"
 else
-  warn "Bundled certificate not found in package."
-  warn "Ensure you installed via: pipx install zettabrain-rag"
-  warn "The server will fall back to HTTP until the cert is present."
+  warn "openssl not found — cannot generate certificate."
+  warn "Install openssl and re-run: sudo zettabrain-setup"
+  warn "The server will fall back to HTTP until a cert is present."
 fi
 
 # ================================================================

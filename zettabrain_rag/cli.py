@@ -279,7 +279,6 @@ def server_cmd():
 # zettabrain-cert
 # -------------------------------------------------------
 def _certbot_env() -> dict:
-    """Return env dict with CERTBOT_BIN pointing to the venv's certbot binary."""
     env = os.environ.copy()
     certbot_path = Path(sys.executable).parent / "certbot"
     if certbot_path.exists():
@@ -287,8 +286,45 @@ def _certbot_env() -> dict:
     return env
 
 
+def _generate_self_signed_cert():
+    CERT_DIR.mkdir(parents=True, exist_ok=True)
+    cert_file = CERT_DIR / "cert.pem"
+    key_file  = CERT_DIR / "key.pem"
+
+    if cert_file.exists() and key_file.exists():
+        print(f"  Certificate already exists at {CERT_DIR}")
+        print("  To regenerate: rm /opt/zettabrain/certs/*.pem && sudo zettabrain-cert")
+        return
+
+    result = subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "ec",
+            "-pkeyopt", "ec_paramgen_curve:P-256",
+            "-keyout", str(key_file),
+            "-out",    str(cert_file),
+            "-days", "3650", "-nodes",
+            "-subj", "/CN=local.zettabrain.app",
+            "-addext", "subjectAltName=DNS:local.zettabrain.app,DNS:localhost,IP:127.0.0.1",
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        print("ERROR: openssl failed:")
+        print(result.stderr.decode())
+        sys.exit(1)
+    key_file.chmod(0o600)
+    cert_file.chmod(0o644)
+    print(f"  Self-signed certificate generated at {CERT_DIR}")
+    print("  Browser will show a one-time warning — normal for self-signed certs.")
+    print("  For a CA-trusted cert: sudo zettabrain-cert --letsencrypt")
+
+
 def cert_cmd():
-    """Obtain a Let's Encrypt wildcard certificate via DNS-01 challenge."""
+    """Generate a TLS certificate for the web GUI.
+
+    Default: self-signed via openssl (works immediately, no DNS required).
+    Use --letsencrypt for a CA-trusted certificate (requires certbot + public domain).
+    """
     _deploy_scripts()
     _banner()
 
@@ -297,10 +333,20 @@ def cert_cmd():
         print("Run:   sudo zettabrain-cert\n")
         sys.exit(1)
 
-    _require(LETSENCRYPT_SCRIPT)
-    LETSENCRYPT_SCRIPT.chmod(0o755)
-    result = subprocess.run(["bash", str(LETSENCRYPT_SCRIPT)], env=_certbot_env())
-    sys.exit(result.returncode)
+    parser = argparse.ArgumentParser(prog="zettabrain-cert")
+    parser.add_argument(
+        "--letsencrypt", action="store_true",
+        help="Obtain a CA-trusted wildcard certificate via Let's Encrypt DNS-01 challenge"
+    )
+    args, _ = parser.parse_known_args()
+
+    if args.letsencrypt:
+        _require(LETSENCRYPT_SCRIPT)
+        LETSENCRYPT_SCRIPT.chmod(0o755)
+        result = subprocess.run(["bash", str(LETSENCRYPT_SCRIPT)], env=_certbot_env())
+        sys.exit(result.returncode)
+
+    _generate_self_signed_cert()
 
 
 # -------------------------------------------------------
