@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zettabrain-rag"
-version = "0.4.8"
+version = "0.4.9"
 description = "Local private RAG pipeline with GUI — LangChain + Ollama + ChromaDB + NFS"
 readme = "README.md"
 license = { text = "MIT" }
@@ -55,14 +55,15 @@ dev = [
 ]
 
 [project.scripts]
-zettabrain        = "zettabrain_rag.cli:main"
-zettabrain-chat   = "zettabrain_rag.cli:chat_cmd"
-zettabrain-ingest = "zettabrain_rag.cli:ingest_cmd"
-zettabrain-setup  = "zettabrain_rag.cli:setup_cmd"
-zettabrain-status  = "zettabrain_rag.cli:status_cmd"
-zettabrain-storage = "zettabrain_rag.cli:storage_cmd"
-zettabrain-server  = "zettabrain_rag.cli:server_cmd"
-zettabrain-cert    = "zettabrain_rag.cli:cert_cmd"
+zettabrain             = "zettabrain_rag.cli:main"
+zettabrain-chat        = "zettabrain_rag.cli:chat_cmd"
+zettabrain-ingest      = "zettabrain_rag.cli:ingest_cmd"
+zettabrain-setup       = "zettabrain_rag.cli:setup_cmd"
+zettabrain-status      = "zettabrain_rag.cli:status_cmd"
+zettabrain-storage     = "zettabrain_rag.cli:storage_cmd"
+zettabrain-server      = "zettabrain_rag.cli:server_cmd"
+zettabrain-cert        = "zettabrain_rag.cli:cert_cmd"
+zettabrain-postinstall = "zettabrain_rag.cli:post_install_cmd"
 
 [project.urls]
 Homepage   = "https://github.com/olajide-zettabrain/zettabrain-rag"

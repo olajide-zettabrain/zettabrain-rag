@@ -271,7 +271,8 @@ export PATH="$PIPX_BIN:/usr/local/bin:$PATH"
 hash -r 2>/dev/null || true
 
 _ZB_CMDS=(zettabrain zettabrain-setup zettabrain-chat zettabrain-ingest \
-           zettabrain-server zettabrain-status zettabrain-storage zettabrain-cert)
+           zettabrain-server zettabrain-status zettabrain-storage zettabrain-cert \
+           zettabrain-postinstall)
 
 for _cmd in "${_ZB_CMDS[@]}"; do
   _src="${PIPX_BIN}/${_cmd}"
@@ -279,6 +280,12 @@ for _cmd in "${_ZB_CMDS[@]}"; do
     ln -sf "$_src" "/usr/local/bin/${_cmd}"
   fi
 done
+
+# Run the postinstall command via full path — refreshes symlinks for any new
+# commands added in this version, works even if PATH is not yet updated.
+if [ -f "${PIPX_BIN}/zettabrain-postinstall" ]; then
+  "${PIPX_BIN}/zettabrain-postinstall" 2>/dev/null || true
+fi
 
 # Also persist ~/.local/bin in PATH for future interactive sessions
 for _profile in /root/.bashrc /root/.profile /root/.bash_profile \

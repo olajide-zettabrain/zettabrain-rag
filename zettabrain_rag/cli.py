@@ -13,9 +13,6 @@ from . import __version__
 
 PKG_DIR     = Path(__file__).parent
 SCRIPTS_DIR = PKG_DIR / "scripts"
-CERTS_DIR   = PKG_DIR / "certs"
-BUNDLED_CERT = CERTS_DIR / "cert.pem"
-BUNDLED_KEY  = CERTS_DIR / "key.pem"
 SETUP_SCRIPT        = SCRIPTS_DIR / "setup.sh"
 STORAGE_ADD_SCRIPT  = SCRIPTS_DIR / "storage_add.sh"
 LETSENCRYPT_SCRIPT  = SCRIPTS_DIR / "letsencrypt.sh"
@@ -38,6 +35,29 @@ _ZB_CMDS = [
 ]
 
 
+def _symlink_to_usr_local():
+    """Symlink all ZettaBrain commands into /usr/local/bin (root only).
+
+    Runs after every deploy so upgrades that add new commands are picked up.
+    Safe to call repeatedly — replaces stale symlinks, skips missing sources.
+    """
+    if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    bin_dir   = Path(sys.executable).parent
+    usr_local = Path("/usr/local/bin")
+    for cmd in _ZB_CMDS:
+        src = bin_dir / cmd
+        dst = usr_local / cmd
+        if not src.exists():
+            continue
+        try:
+            if dst.is_symlink() or dst.exists():
+                dst.unlink()
+            dst.symlink_to(src)
+        except Exception:
+            pass
+
+
 def _deploy_scripts():
     try:
         DEPLOY_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,21 +69,23 @@ def _deploy_scripts():
         if src.exists():
             shutil.copy2(src, dest)  # always overwrite so upgrades take effect
             dest.chmod(0o755)
+    _symlink_to_usr_local()
 
-    # After a direct `pipx install` (no install.sh), ~/.local/bin is often not
-    # in PATH for root shells. Symlink every command into /usr/local/bin once so
-    # subsequent calls work without any PATH changes.
-    if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0:
-        bin_dir   = Path(sys.executable).parent
-        usr_local = Path("/usr/local/bin")
-        for cmd in _ZB_CMDS:
-            src = bin_dir / cmd
-            dst = usr_local / cmd
-            if src.exists() and not dst.exists():
-                try:
-                    dst.symlink_to(src)
-                except Exception:
-                    pass
+
+def post_install_cmd():
+    """Create /usr/local/bin symlinks so all commands are globally accessible.
+
+    Called automatically by install.sh after pipx install/upgrade.
+    Run manually after a direct `pipx install zettabrain-rag`:
+
+        sudo /root/.local/bin/zettabrain-postinstall
+    """
+    if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0:
+        print("Run as root to create /usr/local/bin symlinks:")
+        print("  sudo /root/.local/bin/zettabrain-postinstall")
+        return
+    _symlink_to_usr_local()
+    print("ZettaBrain commands linked into /usr/local/bin — ready to use.")
 
 
 def _find_script(name: str) -> Path:
@@ -216,17 +238,14 @@ def server_cmd():
     parser.add_argument("--reload", action="store_true",   help="Dev mode: auto-reload")
     args, _ = parser.parse_known_args()
 
-    # Cert resolution order: bundled package cert → deployed cert → no TLS
+    # Cert resolution: zettabrain.env → /opt/zettabrain/certs/ fallback → no TLS
     cert_file = key_file = None
     if not args.no_tls:
-        if BUNDLED_CERT.exists() and BUNDLED_KEY.exists():
-            cert_file, key_file = str(BUNDLED_CERT), str(BUNDLED_KEY)
-        else:
-            cfg = _load_config()
-            _c  = cfg.get("ZETTABRAIN_CERT", str(CERT_DIR / "cert.pem"))
-            _k  = cfg.get("ZETTABRAIN_KEY",  str(CERT_DIR / "key.pem"))
-            if Path(_c).exists() and Path(_k).exists():
-                cert_file, key_file = _c, _k
+        cfg = _load_config()
+        _c  = cfg.get("ZETTABRAIN_CERT", str(CERT_DIR / "cert.pem"))
+        _k  = cfg.get("ZETTABRAIN_KEY",  str(CERT_DIR / "key.pem"))
+        if Path(_c).exists() and Path(_k).exists():
+            cert_file, key_file = _c, _k
 
     use_tls = cert_file is not None
     proto   = "https" if use_tls else "http"
