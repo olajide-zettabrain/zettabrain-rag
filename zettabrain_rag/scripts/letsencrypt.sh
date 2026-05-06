@@ -13,27 +13,75 @@ CONFIG_FILE="/opt/zettabrain/src/zettabrain.env"
 HOOK_DIR="/etc/letsencrypt/renewal-hooks/deploy"
 SECRETS_DIR="/root/.secrets"
 
-[ "$(id -u)" = "0" ] || error "Run as root: sudo zettabrain-cert"
+[ "$(id -u)" = "0" ] || error "Run as root: sudo zettabrain-cert --letsencrypt"
+
+# ── Detect OS / package manager ────────────────────────────────────────────
+_OS=""; _PKG=""
+[ -f /etc/os-release ] && { . /etc/os-release; _OS="${ID:-}"; }
+case "$_OS" in
+  ubuntu|debian|linuxmint|pop) _PKG="apt" ;;
+  amzn|rhel|centos|fedora|rocky|almalinux)
+    _PKG="yum"; command -v dnf &>/dev/null && _PKG="dnf" ;;
+  *) command -v apt-get &>/dev/null && _PKG="apt"
+     command -v dnf &>/dev/null && _PKG="dnf"
+     command -v yum &>/dev/null && _PKG="yum" ;;
+esac
+
+# ── Auto-install certbot if missing ───────────────────────────────────────
+_install_certbot() {
+  step "Installing certbot"
+  case "$_PKG" in
+    apt)
+      apt-get update -qq
+      # Try snap first (recommended by EFF for Ubuntu 20.04+)
+      if command -v snap &>/dev/null; then
+        snap install --classic certbot 2>/dev/null \
+          && ln -sf /snap/bin/certbot /usr/local/bin/certbot 2>/dev/null \
+          && ok "certbot installed via snap" && return
+      fi
+      apt-get install -y certbot
+      ok "certbot installed via apt"
+      ;;
+    dnf|yum)
+      "$_PKG" install -y certbot || pip3 install certbot
+      ok "certbot installed"
+      ;;
+    *)
+      pip3 install certbot || error "Cannot install certbot automatically. Run: pip3 install certbot"
+      ;;
+  esac
+}
+
+_install_dns_plugin() {
+  local plugin="$1"   # e.g. certbot-dns-godaddy  or  certbot-dns-cloudflare
+  step "Installing DNS plugin: ${plugin}"
+  # Try system package first, fall back to pip into certbot's environment
+  local sys_pkg="${plugin//-dns-/-dns-python-}"  # certbot-dns-cloudflare → certbot-dns-python-cloudflare (Debian naming)
+  case "$_PKG" in
+    apt) apt-get install -y "python3-${plugin}" 2>/dev/null \
+           || pip3 install "$plugin" ;;
+    dnf|yum) "$_PKG" install -y "python3-${plugin}" 2>/dev/null \
+           || pip3 install "$plugin" ;;
+    *) pip3 install "$plugin" ;;
+  esac
+  ok "Plugin installed: ${plugin}"
+}
 
 # ── Locate certbot ─────────────────────────────────────────────────────────
-# When installed via pipx, certbot lives in the package venv — not system PATH.
-# cli.py sets CERTBOT_BIN to the venv binary; fall back to PATH, then venv scan.
 if [ -n "${CERTBOT_BIN:-}" ] && [ -x "$CERTBOT_BIN" ]; then
   CERTBOT="$CERTBOT_BIN"
 elif command -v certbot &>/dev/null; then
-  CERTBOT="certbot"
+  CERTBOT="$(command -v certbot)"
 else
-  CERTBOT=""
-  for _venv in \
-    /root/.local/share/pipx/venvs/zettabrain-rag \
-    /home/*/.local/share/pipx/venvs/zettabrain-rag; do
-    _cb="${_venv}/bin/certbot"
-    if [ -f "$_cb" ]; then
-      CERTBOT="$_cb"
-      break
-    fi
-  done
-  [ -n "$CERTBOT" ] || error "certbot not found. Try: pipx reinstall zettabrain-rag"
+  # Auto-install and re-check
+  _install_certbot
+  if command -v certbot &>/dev/null; then
+    CERTBOT="$(command -v certbot)"
+  elif [ -x /snap/bin/certbot ]; then
+    CERTBOT="/snap/bin/certbot"
+  else
+    error "certbot installation failed. Install manually: https://certbot.eff.org"
+  fi
 fi
 ok "Using certbot: ${CERTBOT}"
 
@@ -60,6 +108,8 @@ read -rp "  Select [1/2]: " _dns
 
 case "$_dns" in
   1|godaddy|GoDaddy)
+    _install_dns_plugin "certbot-dns-godaddy"
+
     step "GoDaddy API Credentials"
     echo "  Generate at: https://developer.godaddy.com/keys  (Production environment)"
     read -rp  "  API Key:    " GODADDY_KEY
@@ -88,6 +138,8 @@ case "$_dns" in
     ;;
 
   2|cloudflare|Cloudflare)
+    _install_dns_plugin "certbot-dns-cloudflare"
+
     step "Cloudflare API Credentials"
     echo "  Create a token with Zone:DNS:Edit permission at: https://dash.cloudflare.com/profile/api-tokens"
     read -rsp "  API Token: " CF_TOKEN

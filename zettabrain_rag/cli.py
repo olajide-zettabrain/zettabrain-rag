@@ -343,6 +343,7 @@ def cert_cmd():
     if args.letsencrypt:
         _require(LETSENCRYPT_SCRIPT)
         LETSENCRYPT_SCRIPT.chmod(0o755)
+        # Pass shell environment; letsencrypt.sh auto-installs certbot if missing
         result = subprocess.run(["bash", str(LETSENCRYPT_SCRIPT)], env=_certbot_env())
         sys.exit(result.returncode)
 
