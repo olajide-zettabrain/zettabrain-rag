@@ -263,10 +263,20 @@ def _get_storage_sources() -> list[dict]:
     return sources
 
 def _count_docs_all_sources() -> int:
-    """Count supported documents across every configured storage path."""
+    """Count supported documents across every configured storage path.
+    For S3 sources, counts the local sync cache instead of the remote bucket.
+    """
     total = 0
     seen  = set()
     for src in _get_storage_sources():
+        # S3: count the local cache dir that sync populates
+        if src.get("type") == "s3":
+            cache = Path(_cfg.get("ZETTABRAIN_S3_CACHE_DIR", "/opt/zettabrain/s3-cache"))
+            if cache not in seen and cache.exists():
+                seen.add(cache)
+                for ext in ["*.pdf", "*.txt", "*.docx", "*.md"]:
+                    total += len(list(cache.rglob(ext)))
+            continue
         p = Path(src["path"])
         if p in seen or not p.exists():
             continue

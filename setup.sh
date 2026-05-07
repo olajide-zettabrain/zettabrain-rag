@@ -80,7 +80,7 @@ echo -e "  ${CYAN}sudo zettabrain-storage add${NC}"
 echo ""
 
 # -------------------------------------------------------
-# STEP 1/5 — SELECT PRIMARY STORAGE TYPE
+# STEP 1/6 — SELECT PRIMARY STORAGE TYPE
 # -------------------------------------------------------
 step "Step 1/6: Select Primary Storage Type"
 echo ""
@@ -88,16 +88,18 @@ echo -e "  Where are your documents stored?\n"
 echo -e "  ${BOLD}1)${NC} Local storage  — documents are on this machine"
 echo -e "  ${BOLD}2)${NC} NFS share      — documents on a network file server (Linux/Mac)"
 echo -e "  ${BOLD}3)${NC} SMB / CIFS     — documents on a Windows share or Samba"
+echo -e "  ${BOLD}4)${NC} Object storage — S3-compatible bucket (MinIO, AWS S3, Backblaze B2)"
 echo ""
 
 STORAGE_TYPE=""
 while true; do
-  read -rp "  Select [1/2/3]: " _choice
+  read -rp "  Select [1/2/3/4]: " _choice
   case "$_choice" in
-    1|local|Local|LOCAL) STORAGE_TYPE="local"; break ;;
-    2|nfs|NFS)           STORAGE_TYPE="nfs";   break ;;
-    3|smb|SMB|cifs|CIFS) STORAGE_TYPE="smb";   break ;;
-    *) warn "Please enter 1, 2, or 3." ;;
+    1|local|Local|LOCAL)   STORAGE_TYPE="local";  break ;;
+    2|nfs|NFS)             STORAGE_TYPE="nfs";    break ;;
+    3|smb|SMB|cifs|CIFS)  STORAGE_TYPE="smb";    break ;;
+    4|s3|S3|minio|object)  STORAGE_TYPE="s3";     break ;;
+    *) warn "Please enter 1, 2, 3, or 4." ;;
   esac
 done
 
@@ -389,6 +391,68 @@ if [ "$STORAGE_TYPE" = "smb" ]; then
   systemctl daemon-reload 2>/dev/null || true
 
   STORAGE_LABEL="smb://${SMB_SERVER_IP}/${SMB_SHARE}"
+
+fi
+
+# ================================================================
+# ── OPTION 4: S3-COMPATIBLE OBJECT STORAGE ───────────────────────
+# ================================================================
+if [ "$STORAGE_TYPE" = "s3" ]; then
+
+  step "Object Storage Configuration"
+  echo -e "  Supports MinIO, AWS S3, Backblaze B2, and any S3-compatible endpoint.\n"
+
+  read -rp "  Endpoint URL (e.g. http://minio:9000 or https://s3.amazonaws.com): " S3_ENDPOINT
+  [ -z "$S3_ENDPOINT" ] && error "Endpoint URL is required."
+
+  read -rp "  Bucket name: " S3_BUCKET
+  [ -z "$S3_BUCKET" ] && error "Bucket name is required."
+
+  read -rp "  Prefix / folder inside bucket (leave blank for root): " S3_PREFIX
+
+  read -rp "  Access key ID: " S3_ACCESS_KEY
+  [ -z "$S3_ACCESS_KEY" ] && error "Access key is required."
+
+  read -rsp "  Secret access key: " S3_SECRET_KEY
+  echo ""
+  [ -z "$S3_SECRET_KEY" ] && error "Secret key is required."
+
+  # Local cache dir — files synced from bucket before ingestion
+  S3_CACHE_DIR="/opt/zettabrain/s3-cache"
+  mkdir -p "$S3_CACHE_DIR"
+
+  # Verify connectivity using Python boto3 (installed as part of zettabrain-rag)
+  info "Testing connection to ${S3_ENDPOINT}/${S3_BUCKET}..."
+  _s3_test_py=$(cat <<PYEOF
+import sys
+try:
+    import boto3
+    from botocore.client import Config
+    s3 = boto3.client('s3',
+        endpoint_url='${S3_ENDPOINT}',
+        aws_access_key_id='${S3_ACCESS_KEY}',
+        aws_secret_access_key='${S3_SECRET_KEY}',
+        config=Config(signature_version='s3v4'),
+    )
+    s3.head_bucket(Bucket='${S3_BUCKET}')
+    print('ok')
+except ImportError:
+    print('no_boto3')
+except Exception as e:
+    print(f'error:{e}')
+PYEOF
+)
+  _s3_result=$(python3 -c "$_s3_test_py" 2>/dev/null || echo "error:python failed")
+  case "$_s3_result" in
+    ok)         success "Object storage connection verified." ;;
+    no_boto3)   warn "boto3 not found — connection not verified. Run: pipx inject zettabrain-rag boto3" ;;
+    error:*)    warn "Could not connect: ${_s3_result#error:}"
+                warn "Check endpoint URL, credentials, and bucket name." ;;
+  esac
+
+  PRIMARY_PATH="$S3_CACHE_DIR"
+  STORAGE_LABEL="s3:${S3_ENDPOINT}/${S3_BUCKET}"
+  info "Documents will be synced from bucket to: ${S3_CACHE_DIR}"
 
 fi
 
@@ -696,7 +760,24 @@ ZETTABRAIN_EMBED_MODEL="${EMBED_MODEL}"
 # --- Network ---
 ZETTABRAIN_SERVER_HOST="${PRIMARY_IP}"
 ZETTABRAIN_TUNNEL_ENABLED=false
+
+# --- TLS ---
+ZETTABRAIN_TLS_PROVIDER="${ZETTABRAIN_TLS_PROVIDER:-self-signed}"
 ENVEOF
+
+# Append S3 credentials if object storage was selected
+if [ "${STORAGE_TYPE}" = "s3" ]; then
+  cat >> "$CONFIG_FILE" << S3EOF
+
+# --- Object Storage ---
+ZETTABRAIN_S3_ENDPOINT="${S3_ENDPOINT}"
+ZETTABRAIN_S3_BUCKET="${S3_BUCKET}"
+ZETTABRAIN_S3_PREFIX="${S3_PREFIX:-}"
+ZETTABRAIN_S3_ACCESS_KEY="${S3_ACCESS_KEY}"
+ZETTABRAIN_S3_SECRET_KEY="${S3_SECRET_KEY}"
+ZETTABRAIN_S3_CACHE_DIR="${S3_CACHE_DIR}"
+S3EOF
+fi
 
 success "Configuration saved: ${CONFIG_FILE}"
 
@@ -711,33 +792,125 @@ STEOF
 success "Storage registry saved: ${STORAGE_CONFIG}"
 
 # ================================================================
-# STEP 5/6 — TLS CERTIFICATE (self-signed via openssl)
+# STEP 5/6 — HTTPS / TLS SETUP
 # ================================================================
-step "Step 5/6: TLS certificate"
+step "Step 5/6: HTTPS / TLS setup"
+echo ""
+echo -e "  How should HTTPS be provided?\n"
+echo -e "  ${BOLD}1)${NC} Caddy          — automatic Let's Encrypt cert, requires a public domain"
+echo -e "  ${BOLD}2)${NC} Self-signed     — works immediately, browser shows a one-time warning"
+echo -e "  ${BOLD}3)${NC} HTTP only       — no encryption (not recommended for production)"
+echo ""
+
+ZETTABRAIN_TLS_PROVIDER=""
+while true; do
+  read -rp "  Select [1/2/3]: " _tls_choice
+  case "$_tls_choice" in
+    1|caddy|Caddy) ZETTABRAIN_TLS_PROVIDER="caddy";       break ;;
+    2|self|self-signed) ZETTABRAIN_TLS_PROVIDER="self-signed"; break ;;
+    3|http|none)   ZETTABRAIN_TLS_PROVIDER="none";        break ;;
+    *) warn "Please enter 1, 2, or 3." ;;
+  esac
+done
 
 mkdir -p "$CERT_DIR"
 chmod 700 "$CERT_DIR"
 
-if [ -f "$CERT_DIR/cert.pem" ] && [ -f "$CERT_DIR/key.pem" ]; then
-  success "TLS certificate already present at $CERT_DIR"
-elif command -v openssl &>/dev/null; then
-  info "Generating self-signed TLS certificate (valid 10 years)..."
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
-    -keyout "$CERT_DIR/key.pem" \
-    -out    "$CERT_DIR/cert.pem" \
-    -days 3650 -nodes \
-    -subj "/CN=local.zettabrain.app" \
-    -addext "subjectAltName=DNS:local.zettabrain.app,DNS:localhost,IP:127.0.0.1" \
-    2>/dev/null
-  chmod 600 "$CERT_DIR/key.pem"
-  chmod 644 "$CERT_DIR/cert.pem"
-  success "Self-signed certificate generated at $CERT_DIR"
-  info    "Browser will show a one-time warning — this is normal for self-signed certs."
-  info    "For a trusted certificate run: sudo zettabrain-cert --letsencrypt"
+# ── Option 1: Caddy ──────────────────────────────────────────────
+if [ "$ZETTABRAIN_TLS_PROVIDER" = "caddy" ]; then
+
+  read -rp "  Domain name (e.g. zettabrain.yourdomain.com): " CADDY_DOMAIN
+  [ -z "$CADDY_DOMAIN" ] && error "Domain is required for Caddy."
+
+  info "Installing Caddy..."
+  if [ -f /etc/os-release ]; then . /etc/os-release; fi
+  case "${ID:-}" in
+    ubuntu|debian|linuxmint|pop)
+      apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https 2>/dev/null || true
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+        | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+        | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+      apt-get update -qq && apt-get install -y -qq caddy
+      ;;
+    amzn|rhel|centos|fedora|rocky|almalinux)
+      _PM="yum"; command -v dnf &>/dev/null && _PM="dnf"
+      "$_PM" install -y 'dnf-command(copr)' 2>/dev/null || true
+      "$_PM" copr enable -y @caddy/caddy 2>/dev/null \
+        || "$_PM" install -y caddy 2>/dev/null \
+        || { info "Falling back to Caddy binary install...";
+             _caddy_ver=$(curl -sL https://api.github.com/repos/caddyserver/caddy/releases/latest \
+               | grep '"tag_name"' | cut -d'"' -f4);
+             curl -sL "https://github.com/caddyserver/caddy/releases/download/${_caddy_ver}/caddy_${_caddy_ver#v}_linux_amd64.tar.gz" \
+               | tar xz -C /usr/local/bin caddy; }
+      ;;
+    *)
+      warn "Unknown OS — attempting binary install of Caddy..."
+      _caddy_ver=$(curl -sL https://api.github.com/repos/caddyserver/caddy/releases/latest \
+        | grep '"tag_name"' | cut -d'"' -f4)
+      curl -sL "https://github.com/caddyserver/caddy/releases/download/${_caddy_ver}/caddy_${_caddy_ver#v}_linux_amd64.tar.gz" \
+        | tar xz -C /usr/local/bin caddy
+      ;;
+  esac
+
+  command -v caddy &>/dev/null || error "Caddy installation failed."
+  success "Caddy installed: $(caddy version)"
+
+  # Write Caddyfile
+  mkdir -p /etc/caddy
+  cat > /etc/caddy/Caddyfile <<CADDY
+${CADDY_DOMAIN} {
+    reverse_proxy localhost:7860
+    encode gzip
+    log {
+        output file /var/log/caddy/zettabrain.log
+    }
+}
+CADDY
+
+  mkdir -p /var/log/caddy
+  # Enable and start Caddy
+  if command -v systemctl &>/dev/null; then
+    systemctl enable --now caddy 2>/dev/null || true
+    systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+  else
+    caddy start --config /etc/caddy/Caddyfile 2>/dev/null || true
+  fi
+
+  success "Caddy configured for ${CADDY_DOMAIN}"
+  info    "ZettaBrain server will run on HTTP localhost:7860 — Caddy handles HTTPS."
+  info    "DNS: ensure ${CADDY_DOMAIN} points to this server's public IP."
+
+  # Store domain in config
+  _upsert "ZETTABRAIN_CADDY_DOMAIN" "$CADDY_DOMAIN"
+
+# ── Option 2: Self-signed ─────────────────────────────────────────
+elif [ "$ZETTABRAIN_TLS_PROVIDER" = "self-signed" ]; then
+
+  if [ -f "$CERT_DIR/cert.pem" ] && [ -f "$CERT_DIR/key.pem" ]; then
+    success "TLS certificate already present at $CERT_DIR"
+  elif command -v openssl &>/dev/null; then
+    info "Generating self-signed TLS certificate (valid 10 years)..."
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+      -keyout "$CERT_DIR/key.pem" \
+      -out    "$CERT_DIR/cert.pem" \
+      -days 3650 -nodes \
+      -subj "/CN=local.zettabrain.app" \
+      -addext "subjectAltName=DNS:local.zettabrain.app,DNS:localhost,IP:127.0.0.1" \
+      2>/dev/null
+    chmod 600 "$CERT_DIR/key.pem"
+    chmod 644 "$CERT_DIR/cert.pem"
+    success "Self-signed certificate generated at $CERT_DIR"
+    info    "Browser will show a one-time warning — this is normal for self-signed certs."
+  else
+    warn "openssl not found — cannot generate certificate. Server will use HTTP."
+    ZETTABRAIN_TLS_PROVIDER="none"
+  fi
+
+# ── Option 3: HTTP only ───────────────────────────────────────────
 else
-  warn "openssl not found — cannot generate certificate."
-  warn "Install openssl and re-run: sudo zettabrain-setup"
-  warn "The server will fall back to HTTP until a cert is present."
+  warn "Running without TLS. Traffic will be unencrypted."
+  warn "This is only suitable for trusted local networks."
 fi
 
 # ================================================================

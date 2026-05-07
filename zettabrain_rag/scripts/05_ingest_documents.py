@@ -56,6 +56,14 @@ CHROMA_PATH = _get("ZETTABRAIN_CHROMA",  "/opt/zettabrain/src/zettabrain_vectors
 EMBED_MODEL = os.environ.get("ZETTABRAIN_EMBED_MODEL", "nomic-embed-text")
 HASH_CACHE  = "./ingested_files.json"
 
+# S3 / object storage config (set by setup.sh for storage type = s3)
+S3_ENDPOINT   = _get("ZETTABRAIN_S3_ENDPOINT",   "")
+S3_BUCKET     = _get("ZETTABRAIN_S3_BUCKET",     "")
+S3_PREFIX     = _get("ZETTABRAIN_S3_PREFIX",     "")
+S3_ACCESS_KEY = _get("ZETTABRAIN_S3_ACCESS_KEY", "")
+S3_SECRET_KEY = _get("ZETTABRAIN_S3_SECRET_KEY", "")
+S3_CACHE_DIR  = _get("ZETTABRAIN_S3_CACHE_DIR",  "/opt/zettabrain/s3-cache")
+
 SUPPORTED = {".pdf", ".txt", ".docx", ".md"}
 
 
@@ -197,6 +205,66 @@ def ingest_file(filepath: str, vectorstore, hash_cache: dict) -> bool:
 
 
 # -------------------------------------------------------
+# S3 / OBJECT STORAGE SYNC
+# -------------------------------------------------------
+def sync_s3() -> int:
+    """Download new/changed documents from S3-compatible bucket to local cache.
+
+    Returns the number of files downloaded. Skips files whose size + ETag
+    match the cached copy so repeated runs are fast.
+    """
+    if not S3_ENDPOINT or not S3_BUCKET:
+        return 0
+    try:
+        import boto3
+        from botocore.client import Config
+    except ImportError:
+        print("  [WARN] boto3 not installed — S3 sync skipped.")
+        print("         Run: pipx inject zettabrain-rag boto3")
+        return 0
+
+    print(f"\nSyncing from s3://{S3_BUCKET}/{S3_PREFIX} → {S3_CACHE_DIR}")
+    Path(S3_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT,
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY,
+        config=Config(signature_version="s3v4"),
+    )
+
+    downloaded = 0
+    paginator  = s3.get_paginator("list_objects_v2")
+    pages      = paginator.paginate(Bucket=S3_BUCKET, Prefix=S3_PREFIX or "")
+
+    for page in pages:
+        for obj in page.get("Contents", []):
+            key  = obj["Key"]
+            ext  = Path(key).suffix.lower()
+            if ext not in SUPPORTED:
+                continue
+
+            # Flatten bucket path to a safe local filename
+            safe_name = key.replace("/", "__")
+            local     = Path(S3_CACHE_DIR) / safe_name
+            etag_file = Path(S3_CACHE_DIR) / f".etag_{safe_name}"
+
+            remote_etag = obj.get("ETag", "").strip('"')
+            if local.exists() and etag_file.exists():
+                if etag_file.read_text().strip() == remote_etag:
+                    continue  # already up to date
+
+            print(f"  [S3]   Downloading {key}")
+            s3.download_file(S3_BUCKET, key, str(local))
+            etag_file.write_text(remote_etag)
+            downloaded += 1
+
+    print(f"  S3 sync complete — {downloaded} file(s) downloaded.")
+    return downloaded
+
+
+# -------------------------------------------------------
 # MAIN
 # -------------------------------------------------------
 def main():
@@ -237,6 +305,10 @@ def main():
         else:
             print("Cancelled.")
         return
+
+    # ---- S3 sync (runs before local ingestion when object storage is configured) ----
+    if S3_ENDPOINT and S3_BUCKET and not args.file:
+        sync_s3()
 
     # ---- Ingest ----
     hash_cache = load_hash_cache()

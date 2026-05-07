@@ -238,12 +238,18 @@ def server_cmd():
     parser.add_argument("--reload", action="store_true",   help="Dev mode: auto-reload")
     args, _ = parser.parse_known_args()
 
+    cfg = _load_config()
+    tls_provider = cfg.get("ZETTABRAIN_TLS_PROVIDER", "self-signed")
+
+    # Caddy handles TLS externally — server always runs plain HTTP
+    if tls_provider == "caddy":
+        args.no_tls = True
+
     # Cert resolution: zettabrain.env → /opt/zettabrain/certs/ fallback → no TLS
     cert_file = key_file = None
     if not args.no_tls:
-        cfg = _load_config()
-        _c  = cfg.get("ZETTABRAIN_CERT", str(CERT_DIR / "cert.pem"))
-        _k  = cfg.get("ZETTABRAIN_KEY",  str(CERT_DIR / "key.pem"))
+        _c = cfg.get("ZETTABRAIN_CERT", str(CERT_DIR / "cert.pem"))
+        _k = cfg.get("ZETTABRAIN_KEY",  str(CERT_DIR / "key.pem"))
         if Path(_c).exists() and Path(_k).exists():
             cert_file, key_file = _c, _k
 
@@ -251,11 +257,19 @@ def server_cmd():
     proto   = "https" if use_tls else "http"
 
     print(f"  Starting ZettaBrain GUI...")
-    print(f"  Protocol : {'HTTPS — trusted certificate' if use_tls else 'HTTP (no certificate)'}")
-    print(f"\n  Open in browser:")
-    if use_tls:
-        print(f"    https://{LOCAL_HOSTNAME}:{args.port}   ← trusted, fully private")
-    print(f"    {proto}://localhost:{args.port}")
+    if tls_provider == "caddy":
+        domain = cfg.get("ZETTABRAIN_CADDY_DOMAIN", "")
+        print(f"  Protocol : HTTP (Caddy handles HTTPS externally)")
+        print(f"\n  Open in browser:")
+        if domain:
+            print(f"    https://{domain}   ← served via Caddy")
+        print(f"    http://localhost:{args.port}   ← local direct")
+    else:
+        print(f"  Protocol : {'HTTPS — self-signed certificate' if use_tls else 'HTTP (no TLS)'}")
+        print(f"\n  Open in browser:")
+        if use_tls:
+            print(f"    https://{LOCAL_HOSTNAME}:{args.port}   ← HTTPS (accept cert warning once)")
+        print(f"    {proto}://localhost:{args.port}")
     print(f"\n  Press Ctrl+C to stop.\n")
 
     import uvicorn
