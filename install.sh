@@ -67,6 +67,34 @@ esac
 [ -z "$PKG_MANAGER" ] && die "Cannot detect package manager. Supported: apt, yum, dnf."
 success "Detected: ${OS} (${PKG_MANAGER})"
 
+# ── 1b/5  EPEL / extras repos (RHEL, CentOS, Amazon Linux) ───────────
+case "$OS" in
+  rhel|centos|rocky|almalinux)
+    _major="${VERSION_ID%%.*}"
+    info "Enabling EPEL for RHEL ${_major}..."
+    case "$PKG_MANAGER" in
+      dnf) dnf install -y \
+             "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${_major}.noarch.rpm" \
+             >> "$LOG_FILE" 2>&1 \
+             || dnf install -y epel-release >> "$LOG_FILE" 2>&1 || true ;;
+      yum) yum install -y epel-release >> "$LOG_FILE" 2>&1 || true ;;
+    esac
+    # CRB / CodeReady Linux Builder — provides build deps on RHEL 8/9
+    dnf config-manager --set-enabled crb >> "$LOG_FILE" 2>&1 \
+      || subscription-manager repos \
+           --enable "codeready-builder-for-rhel-${_major}-x86_64-rpms" \
+           >> "$LOG_FILE" 2>&1 || true
+    success "EPEL configured."
+    ;;
+  amzn)
+    if [ "${VERSION_ID}" = "2" ]; then
+      info "Amazon Linux 2 — enabling EPEL and Python 3.8 extras..."
+      amazon-linux-extras install -y epel python3.8 >> "$LOG_FILE" 2>&1 || true
+    fi
+    # Amazon Linux 2023 has its own maintained repos — no EPEL needed
+    ;;
+esac
+
 # ── 2/5 System dependencies ──────────────────────────────────
 step "2/5" "Installing system dependencies"
 
@@ -79,12 +107,11 @@ _pkg() {
 
 # Find Python 3.9+
 PYTHON_BIN=""
-for py in python3.12 python3.11 python3.10 python3.9 python3; do
+for py in python3.12 python3.11 python3.10 python3.9 python3.8 python3; do
   if command -v "$py" &>/dev/null; then
     PY_NUM=$("$py" -c "import sys; print(sys.version_info.major*10+sys.version_info.minor)" 2>/dev/null || echo 0)
     if [ "$PY_NUM" -ge 39 ] 2>/dev/null; then
-      PYTHON_BIN="$py"
-      break
+      PYTHON_BIN="$py"; break
     fi
   fi
 done
@@ -92,37 +119,59 @@ done
 if [ -z "$PYTHON_BIN" ]; then
   info "Installing Python 3.11..."
   case "$PKG_MANAGER" in
-    apt) apt-get update -qq >> "$LOG_FILE" 2>&1; _pkg python3.11 python3.11-venv python3-pip ;;
-    yum|dnf) _pkg python3.11 ;;
+    apt)
+      apt-get update -qq >> "$LOG_FILE" 2>&1
+      _pkg python3.11 python3.11-venv python3-pip
+      ;;
+    dnf)
+      # RHEL 9 / AL2023: direct install; RHEL 8: enable module stream first
+      dnf install -y python3.11 >> "$LOG_FILE" 2>&1 \
+        || { dnf module enable -y python311 >> "$LOG_FILE" 2>&1 || true
+             dnf install -y python311 >> "$LOG_FILE" 2>&1 || true; }
+      ;;
+    yum)
+      # Amazon Linux 2: amazon-linux-extras handled above; try python3 fallback
+      yum install -y python3 >> "$LOG_FILE" 2>&1 || true
+      ;;
   esac
-  PYTHON_BIN="python3.11"
+  for py in python3.11 python3.8 python3; do
+    command -v "$py" &>/dev/null && { PYTHON_BIN="$py"; break; }
+  done
+  [ -z "$PYTHON_BIN" ] && die "Could not install Python 3.9+. Check log: $LOG_FILE"
 fi
 
 success "Python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 
 case "$PKG_MANAGER" in
-  apt) apt-get update -qq >> "$LOG_FILE" 2>&1; _pkg python3-pip python3-venv pipx curl git ;;
-  yum|dnf) _pkg python3-pip curl git ;;
+  apt)
+    apt-get update -qq >> "$LOG_FILE" 2>&1
+    _pkg python3-pip python3-venv curl git
+    ;;
+  yum|dnf)
+    _pkg python3-pip curl git
+    ;;
 esac
 
 success "System dependencies installed."
 
 # ── 3/5 NVIDIA drivers ───────────────────────────────────────
-# Installed unconditionally so Ollama detects the GPU on first install.
-# If no NVIDIA hardware is present the packages install harmlessly.
 step "3/5" "Installing NVIDIA drivers"
+
+# Ensure pciutils is available for hardware detection
+_pkg pciutils 2>/dev/null || true
 
 if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
   _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
   success "NVIDIA drivers already active: ${_gpu_name}"
+elif ! lspci 2>/dev/null | grep -qi nvidia; then
+  success "No NVIDIA GPU detected — skipping driver install."
 else
-  info "Installing NVIDIA GPU drivers (ensures GPU is usable regardless of instance type)..."
+  info "NVIDIA GPU detected — installing drivers..."
   _nvidia_reboot=false
 
   case "$PKG_MANAGER" in
     apt)
       # Ubuntu / Debian — ubuntu-drivers autoinstall picks the correct version
-      apt-get install -y -qq pciutils >> "$LOG_FILE" 2>&1 || true
       apt-get install -y -qq "linux-headers-$(uname -r)" 2>/dev/null \
         || apt-get install -y -qq linux-headers-generic >> "$LOG_FILE" 2>&1 || true
       apt-get install -y -qq ubuntu-drivers-common >> "$LOG_FILE" 2>&1 || true
@@ -142,11 +191,11 @@ else
       _os_id="" _os_ver=""
       [ -f /etc/os-release ] && { . /etc/os-release; _os_id="${ID}"; _os_ver="${VERSION_ID}"; }
 
-      # Kernel headers (needed for DKMS driver build)
+      # Kernel headers + dkms (needed for DKMS driver build)
       "$PKG_MANAGER" install -y "kernel-devel-$(uname -r)" "kernel-headers-$(uname -r)" \
         >> "$LOG_FILE" 2>&1 \
         || "$PKG_MANAGER" install -y kernel-devel kernel-headers >> "$LOG_FILE" 2>&1 || true
-      "$PKG_MANAGER" install -y pciutils >> "$LOG_FILE" 2>&1 || true
+      "$PKG_MANAGER" install -y dkms >> "$LOG_FILE" 2>&1 || true
 
       _cuda_repo=""
       case "${_os_id}" in
@@ -164,16 +213,18 @@ else
 
       if [ -n "$_cuda_repo" ]; then
         info "Adding NVIDIA CUDA repository..."
-        if command -v dnf &>/dev/null; then
-          dnf config-manager --add-repo "$_cuda_repo" >> "$LOG_FILE" 2>&1 || true
-          dnf clean expire-cache >> "$LOG_FILE" 2>&1 || true
-          info "Installing cuda-drivers (this may take several minutes)..."
+        _major="${_os_ver%%.*}"
+        # DNF5 (RHEL 10+) dropped config-manager --add-repo; download repo file directly
+        curl -fsSL "$_cuda_repo" -o /etc/yum.repos.d/cuda-nvidia.repo >> "$LOG_FILE" 2>&1 || true
+        "$PKG_MANAGER" clean expire-cache >> "$LOG_FILE" 2>&1 || true
+        info "Installing cuda-drivers (this may take several minutes)..."
+        if [ "${_major}" -ge 10 ] 2>/dev/null; then
+          # RHEL 10 / DNF5 — module streams deprecated; use --nobest --skip-broken
+          "$PKG_MANAGER" install -y cuda-drivers --nobest --skip-broken >> "$LOG_FILE" 2>&1 || true
+        elif command -v dnf &>/dev/null; then
           dnf module install -y "nvidia-driver:latest-dkms" >> "$LOG_FILE" 2>&1 \
             || dnf install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
         else
-          yum-config-manager --add-repo "$_cuda_repo" >> "$LOG_FILE" 2>&1 || true
-          yum clean expire-cache >> "$LOG_FILE" 2>&1 || true
-          info "Installing cuda-drivers (this may take several minutes)..."
           yum install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
         fi
       else
@@ -308,6 +359,8 @@ step "5/5" "Installing Ollama + embedding model"
 if command -v ollama &>/dev/null; then
   info "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"
 else
+  # zstd required by Ollama's installer for archive extraction
+  command -v zstd &>/dev/null || _pkg zstd
   info "Installing Ollama (downloading ~60MB)..."
   curl -fsSL https://ollama.com/install.sh | sh 2>&1 | sed 's/^/  /'
   success "Ollama installed."
