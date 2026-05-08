@@ -124,7 +124,13 @@ if ($zbInstalled) {
     Info "Upgrading zettabrain-rag (downloading latest + dependencies)..."
     Write-Host "  (This can take 2-5 minutes — please wait)"
     Write-Host ""
-    & $PIPX upgrade --pip-args='--no-cache-dir' zettabrain-rag 2>&1 | ForEach-Object { "  $_" }
+    $upgradeOut = (& $PIPX upgrade --pip-args='--no-cache-dir' zettabrain-rag 2>&1)
+    $upgradeOut | ForEach-Object { "  $_" }
+    # Venv has stale Python interpreter (e.g. after re-install) — reinstall-all fixes it
+    if ($upgradeOut | Select-String "invalid python interpreter") {
+        Info "Stale Python interpreter in venv — running pipx reinstall-all..."
+        & $PIPX reinstall-all 2>&1 | ForEach-Object { "  $_" }
+    }
 } else {
     Info "Installing zettabrain-rag (downloading package + dependencies)..."
     Write-Host "  (This can take 3-6 minutes — please wait)"
@@ -132,16 +138,32 @@ if ($zbInstalled) {
     & $PIPX install --pip-args='--no-cache-dir' zettabrain-rag 2>&1 | ForEach-Object { "  $_" }
 }
 
-# Add pipx bin to system PATH permanently
+# Find where pipx put the scripts and add to PATH
 Refresh-Path
-$pipxBin = "$env:USERPROFILE\.local\bin"
-$machinePath = [System.Environment]::GetEnvironmentVariable("PATH","Machine")
-if ($machinePath -notlike "*$pipxBin*") {
-    [System.Environment]::SetEnvironmentVariable("PATH", "$machinePath;$pipxBin", "Machine")
-    $env:PATH += ";$pipxBin"
+& $PIPX ensurepath 2>&1 | Out-Null
+Refresh-Path
+
+# pipx can place scripts in several locations on Windows — check all of them
+$pipxBinDirs = @(
+    "$env:USERPROFILE\.local\bin",
+    "$env:USERPROFILE\pipx\venvs\zettabrain-rag\Scripts",
+    "$env:APPDATA\Python\Scripts",
+    "$env:USERPROFILE\AppData\Roaming\Python\Python311\Scripts",
+    "$env:LOCALAPPDATA\Programs\Python\Python311\Scripts"
+)
+foreach ($dir in $pipxBinDirs) {
+    if (Test-Path "$dir\zettabrain.exe") {
+        $env:PATH += ";$dir"
+        $machinePath = [System.Environment]::GetEnvironmentVariable("PATH","Machine")
+        if ($machinePath -notlike "*$dir*") {
+            [System.Environment]::SetEnvironmentVariable("PATH","$machinePath;$dir","Machine")
+        }
+        break
+    }
 }
 
-$INSTALLED_VERSION = "$(& zettabrain --version 2>$null)"
+$INSTALLED_VERSION = $null
+try { $INSTALLED_VERSION = (& zettabrain --version 2>&1) | Select-Object -First 1 } catch { }
 if (-not $INSTALLED_VERSION) { $INSTALLED_VERSION = "latest" }
 Write-Host ""
 OK "ZettaBrain RAG installed: $INSTALLED_VERSION"
