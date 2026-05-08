@@ -299,18 +299,19 @@ _ensure_pipx() {
 _ensure_pipx
 success "pipx $(pipx --version 2>/dev/null)"
 
-# Install or upgrade — show live output so the user can see download progress
+# Install or upgrade — always bypass pip cache so we get the true latest from PyPI
+# (pip cache can serve a stale wheel, requiring two runs to get a new release)
 echo ""
 if pipx list 2>/dev/null | grep -q "zettabrain-rag"; then
   info "Upgrading zettabrain-rag (downloading latest + dependencies)..."
   echo "  (This can take 2-5 minutes on first upgrade — please wait)"
   echo ""
-  pipx upgrade zettabrain-rag 2>&1 | sed 's/^/  /'
+  pipx upgrade --pip-args='--no-cache-dir' zettabrain-rag 2>&1 | sed 's/^/  /'
 else
   info "Installing zettabrain-rag (downloading package + dependencies)..."
   echo "  (This can take 3-6 minutes — please wait)"
   echo ""
-  pipx install zettabrain-rag 2>&1 | sed 's/^/  /'
+  pipx install --pip-args='--no-cache-dir' zettabrain-rag 2>&1 | sed 's/^/  /'
 fi
 
 # ── Make CLI commands globally available ─────────────────────
