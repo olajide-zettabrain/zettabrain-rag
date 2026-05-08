@@ -280,12 +280,7 @@
           <div class="welcome-icon">🧠</div>
           <h2>Ask anything about your documents</h2>
           <p>ZettaBrain searches your local knowledge base using AI — completely private, zero cloud.</p>
-          <div class="suggestions" id="suggestions">
-            <div class="suggestion" onclick="sendSuggestion(this)">What is cloud computing?</div>
-            <div class="suggestion" onclick="sendSuggestion(this)">Summarise the key topics</div>
-            <div class="suggestion" onclick="sendSuggestion(this)">What is AWS?</div>
-            <div class="suggestion" onclick="sendSuggestion(this)">Explain machine learning</div>
-          </div>
+          <div class="suggestions" id="suggestions"></div>
         </div>
       </div>
 
@@ -481,11 +476,12 @@ async function refreshStatus() {
     if (status.ollama.models.length === 0) {
       sel.innerHTML = '<option value="">No models found</option>';
     } else {
+      const activeLlm = (status.ollama && status.ollama.active_llm) || prev;
       status.ollama.models.forEach(m => {
         const opt = document.createElement('option');
         opt.value = m;
         opt.textContent = m;
-        if (m === prev || m.startsWith('llama3.1')) opt.selected = true;
+        if (m === activeLlm || m === prev) opt.selected = true;
         sel.appendChild(opt);
       });
     }
@@ -499,14 +495,53 @@ async function refreshStatus() {
       list.innerHTML = status.sources.map(s => `<li title="${s}">${s}</li>`).join('');
     }
 
-    // Update suggestions based on sources
-    if (status.sources.length > 0 && status.vectorstore.chunks > 0) {
-      document.getElementById('suggestions').style.display = 'flex';
-    }
+    // Suggestions — built from actual ingested filenames
+    updateSuggestions(status.sources, status.vectorstore.chunks > 0);
 
   } catch(e) {
     setDot('dot-ollama', 'red');
   }
+}
+
+function updateSuggestions(sources, hasChunks) {
+  const container = document.getElementById('suggestions');
+  if (!container) return;
+
+  if (!sources || sources.length === 0 || !hasChunks) {
+    container.innerHTML = `
+      <div class="suggestion" onclick="sendSuggestion(this)">What are the main topics?</div>
+      <div class="suggestion" onclick="sendSuggestion(this)">Summarise my documents</div>
+      <div class="suggestion" onclick="sendSuggestion(this)">List the key conclusions</div>
+      <div class="suggestion" onclick="sendSuggestion(this)">What are the most important points?</div>
+    `;
+    return;
+  }
+
+  // Build suggestions from actual file names
+  const suggestions = [];
+  const stripExt = n => n.replace(/\.[^.]+$/, '');
+
+  // One "Summarise X" per unique file (up to 2)
+  sources.slice(0, 2).forEach(filename => {
+    const name = stripExt(filename);
+    suggestions.push(`Summarise "${name}"`);
+  });
+
+  // Generic cross-document questions to fill up to 4
+  const generic = [
+    'What are the main topics covered?',
+    'List the key conclusions',
+    'What are the most important points?',
+    'Compare the main themes across documents',
+  ];
+  for (const g of generic) {
+    if (suggestions.length >= 4) break;
+    suggestions.push(g);
+  }
+
+  container.innerHTML = suggestions.map(s =>
+    `<div class="suggestion" onclick="sendSuggestion(this)">${s}</div>`
+  ).join('');
 }
 
 function setDot(id, cls) {
