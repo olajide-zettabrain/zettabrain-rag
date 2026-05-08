@@ -40,7 +40,7 @@ STORAGE_CONF = DEPLOY_DIR / "storage.conf"
 def _load_config() -> dict:
     cfg = {}
     if CONFIG_FILE.exists():
-        for line in CONFIG_FILE.read_text().splitlines():
+        for line in CONFIG_FILE.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
                 cfg[k.strip()] = v.strip().strip('"')
@@ -219,7 +219,7 @@ def _get_sources() -> list:
     if not INGEST_LOG.exists():
         return []
     try:
-        data = json.loads(INGEST_LOG.read_text())
+        data = json.loads(INGEST_LOG.read_text(encoding="utf-8"))
         return sorted([Path(p).name for p in data.keys()])
     except Exception:
         return []
@@ -245,7 +245,7 @@ def _get_storage_sources() -> list[dict]:
     """Return all configured storage sources from storage.conf."""
     sources = []
     if STORAGE_CONF.exists():
-        for line in STORAGE_CONF.read_text().splitlines():
+        for line in STORAGE_CONF.read_text(encoding="utf-8").splitlines():
             if line.startswith("#") or not line.strip():
                 continue
             parts = line.split("|")
@@ -283,7 +283,7 @@ def _count_docs_all_sources() -> int:
 async def root():
     index = STATIC_DIR / "index.html"
     if index.exists():
-        return HTMLResponse(index.read_text())
+        return HTMLResponse(index.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>ZettaBrain</h1><p>Static files not found.</p>")
 
 
@@ -544,7 +544,7 @@ async def clear_vectorstore():
         _reset_vs_cache()
         chromadb.PersistentClient(path=str(CHROMA_PATH)).delete_collection("zettabrain_docs")
         if INGEST_LOG.exists():
-            INGEST_LOG.write_text("{}")
+            INGEST_LOG.write_text("{}", encoding="utf-8")
         return {"success": True, "message": "Vector store cleared."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

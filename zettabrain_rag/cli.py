@@ -107,7 +107,7 @@ def _find_python() -> str:
 def _load_config() -> dict:
     cfg = {}
     if CONFIG_FILE.exists():
-        for line in CONFIG_FILE.read_text().splitlines():
+        for line in CONFIG_FILE.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
                 cfg[k.strip()] = v.strip().strip('"')
@@ -406,7 +406,7 @@ def storage_cmd():
             print("No storage sources configured. Run: sudo zettabrain-setup")
             return
         print("\nConfigured storage sources:\n")
-        for line in storage_conf.read_text().splitlines():
+        for line in storage_conf.read_text(encoding="utf-8").splitlines():
             if line.startswith("#") or not line.strip():
                 continue
             parts = line.split("|")
@@ -483,7 +483,7 @@ def status_cmd():
         print(f"Vector store : {chroma} ({size:.1f} MB)")
         import json
         if ingest.exists():
-            data = json.loads(ingest.read_text())
+            data = json.loads(ingest.read_text(encoding="utf-8"))
             print(f"Tracked files: {len(data)}")
             for fp in sorted(data):
                 print(f"  - {Path(fp).name}")
