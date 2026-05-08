@@ -70,7 +70,9 @@ if (-not $PYTHON) {
         $url = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"
         $tmp = "$env:TEMP\python-installer.exe"
         Info "Downloading Python 3.11 (~25MB)..."
-        Invoke-WebRequest -Uri $url -OutFile $tmp
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+        $ProgressPreference = 'Continue'
         Start-Process $tmp -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1" -Wait
         Remove-Item $tmp -EA SilentlyContinue
     }
@@ -107,7 +109,6 @@ if (-not (Get-Command pipx -EA SilentlyContinue)) {
     Refresh-Path
     $env:PATH += ";$env:USERPROFILE\.local\bin;$env:APPDATA\Python\Scripts"
     $env:PATH += ";$env:USERPROFILE\AppData\Roaming\Python\Python311\Scripts"
-    hash 2>$null; $null = $null  # no-op, just refresh
 }
 
 $PIPX = if (Get-Command pipx -EA SilentlyContinue) { "pipx" }
@@ -163,7 +164,10 @@ foreach ($dir in $pipxBinDirs) {
 }
 
 $INSTALLED_VERSION = $null
-try { $INSTALLED_VERSION = (& zettabrain --version 2>&1) | Select-Object -First 1 } catch { }
+try {
+    $listOut = (& $PIPX list 2>&1) -join "`n"
+    if ($listOut -match 'zettabrain.rag\s+([0-9][^\s,]+)') { $INSTALLED_VERSION = $Matches[1] }
+} catch { }
 if (-not $INSTALLED_VERSION) { $INSTALLED_VERSION = "latest" }
 Write-Host ""
 OK "ZettaBrain RAG installed: $INSTALLED_VERSION"
@@ -181,7 +185,9 @@ if (Get-Command ollama -EA SilentlyContinue) {
         $url = "https://ollama.com/download/OllamaSetup.exe"
         $tmp = "$env:TEMP\OllamaSetup.exe"
         Info "Downloading Ollama (~60MB)..."
-        Invoke-WebRequest -Uri $url -OutFile $tmp
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+        $ProgressPreference = 'Continue'
         Start-Process $tmp -ArgumentList "/silent" -Wait
         Remove-Item $tmp -EA SilentlyContinue
     }
