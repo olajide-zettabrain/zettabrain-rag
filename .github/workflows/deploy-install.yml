@@ -3,7 +3,7 @@ name: Deploy install.sh to S3
 on:
   push:
     branches: [main]
-    paths: [install.sh, install.ps1]
+    paths: [install.sh, install.ps1, install.cmd]
   workflow_dispatch:
 
 jobs:
@@ -25,6 +25,9 @@ jobs:
           aws s3 cp install.ps1 "s3://${S3_BUCKET}/install.ps1" \
             --content-type "text/plain" \
             --cache-control "no-cache, no-store, must-revalidate"
+          aws s3 cp install.cmd "s3://${S3_BUCKET}/install.cmd" \
+            --content-type "text/plain" \
+            --cache-control "no-cache, no-store, must-revalidate"
 
       - name: Invalidate CloudFront cache
         env:
@@ -35,4 +38,4 @@ jobs:
         run: |
           aws cloudfront create-invalidation \
             --distribution-id "${CLOUDFRONT_DISTRIBUTION_ID}" \
-            --paths "/install.sh" "/install.ps1"
+            --paths "/install.sh" "/install.ps1" "/install.cmd"
