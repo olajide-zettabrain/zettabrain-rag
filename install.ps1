@@ -89,15 +89,28 @@ Step "4/5" "Installing ZettaBrain RAG"
 
 if (-not (Get-Command pipx -EA SilentlyContinue)) {
     Info "Installing pipx..."
-    & $PYTHON -m pip install --quiet --upgrade pipx 2>&1 | Out-File $LOG_FILE -Append
+
+    # Ensure pip itself is available and up to date
+    & $PYTHON -m ensurepip --upgrade 2>&1 | Out-File $LOG_FILE -Append
+    Info "Upgrading pip..."
+    & $PYTHON -m pip install --upgrade pip 2>&1 | ForEach-Object { "  $_" }
+
+    # Install pipx — show output so failures are visible
+    Info "Installing pipx via pip..."
+    & $PYTHON -m pip install --upgrade pipx 2>&1 | ForEach-Object { "  $_" }
+
+    # Add pipx to PATH for this session
     & $PYTHON -m pipx ensurepath 2>&1 | Out-File $LOG_FILE -Append
     Refresh-Path
-    # Also check common pipx locations
     $env:PATH += ";$env:USERPROFILE\.local\bin;$env:APPDATA\Python\Scripts"
+    $env:PATH += ";$env:USERPROFILE\AppData\Roaming\Python\Python311\Scripts"
+    hash 2>$null; $null = $null  # no-op, just refresh
 }
 
 $PIPX = if (Get-Command pipx -EA SilentlyContinue) { "pipx" }
         elseif (Test-Path "$env:USERPROFILE\.local\bin\pipx.exe") { "$env:USERPROFILE\.local\bin\pipx.exe" }
+        elseif (Test-Path "$env:APPDATA\Python\Scripts\pipx.exe") { "$env:APPDATA\Python\Scripts\pipx.exe" }
+        elseif (Test-Path "$env:USERPROFILE\AppData\Roaming\Python\Python311\Scripts\pipx.exe") { "$env:USERPROFILE\AppData\Roaming\Python\Python311\Scripts\pipx.exe" }
         else { Fail "Could not install pipx. Check log: $LOG_FILE" }
 
 OK "pipx $(& $PIPX --version 2>$null)"
