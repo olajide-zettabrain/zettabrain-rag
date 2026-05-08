@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zettabrain-rag"
-version = "0.5.11"
+version = "0.5.12"
 description = "Private AI document assistant — local RAG pipeline with web GUI. Zero cloud. Supports local, NFS, SMB and object storage."
 readme = "README.md"
 license = { text = "MIT" }

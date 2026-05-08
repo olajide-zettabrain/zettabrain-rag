@@ -1,12 +1,12 @@
 #!/bin/bash
 # ============================================================
 # ZettaBrain RAG — One-line Installer
-# Usage: curl -fsSL https://zettabrain.app/install.sh | sudo bash
+# Linux:  curl -fsSL https://zettabrain.app/install.sh | sudo bash
+# macOS:  curl -fsSL https://zettabrain.app/install.sh | bash
 # ============================================================
 
 set -e
 
-LOG_FILE="/var/log/zettabrain-install.log"
 EMBED_MODEL="nomic-embed-text"
 
 # ── Colours ──────────────────────────────────────────────────
@@ -25,6 +25,18 @@ warn()    { echo -e "${YELLOW}  !${NC} $*"; log "WARN  $*"; }
 die()     { echo -e "${RED}  ✗ ERROR:${NC} $*"; log "ERROR $*"; echo ""; exit 1; }
 step()    { echo ""; echo -e "${BOLD}${BLUE}[$1]${NC} $2"; }
 
+# ── macOS vs Linux ───────────────────────────────────────────
+_MACOS=false
+[ "$(uname -s)" = "Darwin" ] && _MACOS=true
+
+if $_MACOS; then
+  LOG_FILE="$HOME/Library/Logs/zettabrain-install.log"
+  mkdir -p "$HOME/Library/Logs"
+else
+  LOG_FILE="/var/log/zettabrain-install.log"
+  mkdir -p /var/log
+fi
+
 # ── Banner ───────────────────────────────────────────────────
 clear 2>/dev/null || true
 echo ""
@@ -36,24 +48,27 @@ echo "  ╚═══════════════════════
 echo -e "${NC}"
 echo ""
 
-# ── Root check ───────────────────────────────────────────────
-if [ "$EUID" -ne 0 ]; then
+# ── Root check (Linux only — Homebrew refuses to run as root) ─
+if ! $_MACOS && [ "$EUID" -ne 0 ]; then
   die "This installer must be run as root.\n  Run: curl -fsSL https://zettabrain.app/install.sh | sudo bash"
 fi
-
-mkdir -p /var/log
 
 # ── 1/5 OS detection ─────────────────────────────────────────
 step "1/5" "Detecting operating system"
 
 OS=""
 PKG_MANAGER=""
-if [ -f /etc/os-release ]; then
+
+if $_MACOS; then
+  OS="macos"
+  PKG_MANAGER="brew"
+elif [ -f /etc/os-release ]; then
   . /etc/os-release
   OS="${ID}"
 fi
 
 case "$OS" in
+  macos) ;;  # handled above
   ubuntu|debian|linuxmint|pop) PKG_MANAGER="apt" ;;
   amzn|rhel|centos|fedora|rocky|almalinux)
     PKG_MANAGER="yum"
@@ -64,10 +79,29 @@ case "$OS" in
     command -v dnf     &>/dev/null && PKG_MANAGER="dnf" ;;
 esac
 
-[ -z "$PKG_MANAGER" ] && die "Cannot detect package manager. Supported: apt, yum, dnf."
+[ -z "$PKG_MANAGER" ] && die "Cannot detect package manager. Supported: brew, apt, yum, dnf."
 success "Detected: ${OS} (${PKG_MANAGER})"
 
-# ── 1b/5  EPEL / extras repos (RHEL, CentOS, Amazon Linux) ───────────
+# ── 1b/5 Homebrew (macOS) ─────────────────────────────────────
+if $_MACOS; then
+  if ! command -v brew &>/dev/null; then
+    info "Installing Homebrew..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+      >> "$LOG_FILE" 2>&1
+    # Add brew to PATH for this session (Apple Silicon vs Intel)
+    if [ -f /opt/homebrew/bin/brew ]; then
+      eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [ -f /usr/local/bin/brew ]; then
+      eval "$(/usr/local/bin/brew shellenv)"
+    fi
+    command -v brew &>/dev/null || die "Homebrew install failed. Check log: $LOG_FILE"
+    success "Homebrew installed."
+  else
+    info "Homebrew already installed: $(brew --version | head -1)"
+  fi
+fi
+
+# ── 1c/5 EPEL / extras repos (RHEL, CentOS, Amazon Linux) ────
 case "$OS" in
   rhel|centos|rocky|almalinux)
     _major="${VERSION_ID%%.*}"
@@ -79,7 +113,6 @@ case "$OS" in
              || dnf install -y epel-release >> "$LOG_FILE" 2>&1 || true ;;
       yum) yum install -y epel-release >> "$LOG_FILE" 2>&1 || true ;;
     esac
-    # CRB / CodeReady Linux Builder — provides build deps on RHEL 8/9
     dnf config-manager --set-enabled crb >> "$LOG_FILE" 2>&1 \
       || subscription-manager repos \
            --enable "codeready-builder-for-rhel-${_major}-x86_64-rpms" \
@@ -91,7 +124,6 @@ case "$OS" in
       info "Amazon Linux 2 — enabling EPEL and Python 3.8 extras..."
       amazon-linux-extras install -y epel python3.8 >> "$LOG_FILE" 2>&1 || true
     fi
-    # Amazon Linux 2023 has its own maintained repos — no EPEL needed
     ;;
 esac
 
@@ -102,6 +134,7 @@ _pkg() {
   case "$PKG_MANAGER" in
     apt)     apt-get install -y -qq "$@" >> "$LOG_FILE" 2>&1 ;;
     yum|dnf) "$PKG_MANAGER" install -y -q "$@" >> "$LOG_FILE" 2>&1 ;;
+    brew)    brew install "$@" >> "$LOG_FILE" 2>&1 || true ;;
   esac
 }
 
@@ -119,18 +152,17 @@ done
 if [ -z "$PYTHON_BIN" ]; then
   info "Installing Python 3.11..."
   case "$PKG_MANAGER" in
+    brew) brew install python@3.11 >> "$LOG_FILE" 2>&1 || true ;;
     apt)
       apt-get update -qq >> "$LOG_FILE" 2>&1
       _pkg python3.11 python3.11-venv python3-pip
       ;;
     dnf)
-      # RHEL 9 / AL2023: direct install; RHEL 8: enable module stream first
       dnf install -y python3.11 >> "$LOG_FILE" 2>&1 \
         || { dnf module enable -y python311 >> "$LOG_FILE" 2>&1 || true
              dnf install -y python311 >> "$LOG_FILE" 2>&1 || true; }
       ;;
     yum)
-      # Amazon Linux 2: amazon-linux-extras handled above; try python3 fallback
       yum install -y python3 >> "$LOG_FILE" 2>&1 || true
       ;;
   esac
@@ -150,20 +182,21 @@ case "$PKG_MANAGER" in
   yum|dnf)
     _pkg python3-pip curl git
     ;;
+  brew)
+    _pkg git curl
+    ;;
 esac
 
 # zstd — installed early, required by Ollama's installer for archive extraction.
-# Shown on screen (not silenced) so failures are immediately visible.
 if ! command -v zstd &>/dev/null; then
   info "Installing zstd..."
   case "$PKG_MANAGER" in
+    brew) brew install zstd 2>&1 | sed 's/^/  /' ;;
     apt)
       apt-get update -qq >> "$LOG_FILE" 2>&1 || true
       apt-get install -y zstd 2>&1 | sed 's/^/  /' ;;
-    dnf)
-      dnf install -y zstd 2>&1 | sed 's/^/  /' ;;
-    yum)
-      yum install -y zstd 2>&1 | sed 's/^/  /' ;;
+    dnf) dnf install -y zstd 2>&1 | sed 's/^/  /' ;;
+    yum) yum install -y zstd 2>&1 | sed 's/^/  /' ;;
   esac
   command -v zstd &>/dev/null \
     || die "zstd install failed. Run manually: sudo ${PKG_MANAGER} install zstd — then re-run."
@@ -174,114 +207,104 @@ success "System dependencies installed."
 # ── 3/5 NVIDIA drivers ───────────────────────────────────────
 step "3/5" "Installing NVIDIA drivers"
 
-# Ensure pciutils is available for hardware detection
-_pkg pciutils 2>/dev/null || true
-
-if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
-  _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
-  success "NVIDIA drivers already active: ${_gpu_name}"
-elif ! lspci 2>/dev/null | grep -qi nvidia; then
-  success "No NVIDIA GPU detected — skipping driver install."
+if $_MACOS; then
+  success "macOS detected — skipping NVIDIA driver install."
 else
-  info "NVIDIA GPU detected — installing drivers..."
-  _nvidia_reboot=false
-
-  case "$PKG_MANAGER" in
-    apt)
-      # Ubuntu / Debian — ubuntu-drivers autoinstall picks the correct version
-      apt-get install -y -qq "linux-headers-$(uname -r)" 2>/dev/null \
-        || apt-get install -y -qq linux-headers-generic >> "$LOG_FILE" 2>&1 || true
-      apt-get install -y -qq ubuntu-drivers-common >> "$LOG_FILE" 2>&1 || true
-
-      if command -v ubuntu-drivers &>/dev/null; then
-        info "Running ubuntu-drivers autoinstall (this may take a few minutes)..."
-        ubuntu-drivers autoinstall >> "$LOG_FILE" 2>&1 \
-          || apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
-      else
-        apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
-      fi
-      _nvidia_reboot=true
-      ;;
-
-    yum|dnf)
-      # Amazon Linux / RHEL / CentOS / Fedora — use NVIDIA CUDA repo
-      _os_id="" _os_ver=""
-      [ -f /etc/os-release ] && { . /etc/os-release; _os_id="${ID}"; _os_ver="${VERSION_ID}"; }
-
-      # Kernel headers + dkms (needed for DKMS driver build)
-      "$PKG_MANAGER" install -y "kernel-devel-$(uname -r)" "kernel-headers-$(uname -r)" \
-        >> "$LOG_FILE" 2>&1 \
-        || "$PKG_MANAGER" install -y kernel-devel kernel-headers >> "$LOG_FILE" 2>&1 || true
-      "$PKG_MANAGER" install -y dkms >> "$LOG_FILE" 2>&1 || true
-
-      _cuda_repo=""
-      case "${_os_id}" in
-        amzn)
-          case "${_os_ver}" in
-            2)    _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo" ;;
-            202*) _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo" ;;
-          esac ;;
-        rhel|centos|rocky|almalinux)
-          _major="${_os_ver%%.*}"
-          _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel${_major}/x86_64/cuda-rhel${_major}.repo" ;;
-        fedora)
-          _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora${_os_ver}/x86_64/cuda-fedora${_os_ver}.repo" ;;
-      esac
-
-      if [ -n "$_cuda_repo" ]; then
-        info "Adding NVIDIA CUDA repository..."
-        _major="${_os_ver%%.*}"
-        # DNF5 (RHEL 10+) dropped config-manager --add-repo; download repo file directly
-        curl -fsSL "$_cuda_repo" -o /etc/yum.repos.d/cuda-nvidia.repo >> "$LOG_FILE" 2>&1 || true
-        "$PKG_MANAGER" clean expire-cache >> "$LOG_FILE" 2>&1 || true
-        info "Installing cuda-drivers (this may take several minutes)..."
-        if [ "${_major}" -ge 10 ] 2>/dev/null; then
-          # RHEL 10 / DNF5 — module streams deprecated; use --nobest --skip-broken
-          "$PKG_MANAGER" install -y cuda-drivers --nobest --skip-broken >> "$LOG_FILE" 2>&1 || true
-        elif command -v dnf &>/dev/null; then
-          dnf module install -y "nvidia-driver:latest-dkms" >> "$LOG_FILE" 2>&1 \
-            || dnf install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
-        else
-          yum install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
-        fi
-      else
-        warn "Unrecognised OS (${_os_id} ${_os_ver}) — skipping NVIDIA repo setup."
-        warn "Install drivers manually: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/"
-      fi
-      _nvidia_reboot=true
-      ;;
-  esac
-
-  # Attempt to load the kernel module so Ollama (installed next) sees the GPU
-  modprobe nvidia >> "$LOG_FILE" 2>&1 || true
-  sleep 2
+  _pkg pciutils 2>/dev/null || true
 
   if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
     _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
-    success "NVIDIA drivers active — GPU detected: ${_gpu_name}"
-  elif $_nvidia_reboot; then
-    warn "NVIDIA drivers installed — a reboot is required to activate the kernel module."
-    warn "After reboot, Ollama will detect the GPU automatically."
-    warn "  → Installation continues; Ollama will run on CPU until you reboot."
+    success "NVIDIA drivers already active: ${_gpu_name}"
+  elif ! lspci 2>/dev/null | grep -qi nvidia; then
+    success "No NVIDIA GPU detected — skipping driver install."
   else
-    warn "NVIDIA driver installation may not have completed. Check: ${LOG_FILE}"
+    info "NVIDIA GPU detected — installing drivers..."
+    _nvidia_reboot=false
+
+    case "$PKG_MANAGER" in
+      apt)
+        apt-get install -y -qq "linux-headers-$(uname -r)" 2>/dev/null \
+          || apt-get install -y -qq linux-headers-generic >> "$LOG_FILE" 2>&1 || true
+        apt-get install -y -qq ubuntu-drivers-common >> "$LOG_FILE" 2>&1 || true
+        if command -v ubuntu-drivers &>/dev/null; then
+          info "Running ubuntu-drivers autoinstall (this may take a few minutes)..."
+          ubuntu-drivers autoinstall >> "$LOG_FILE" 2>&1 \
+            || apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
+        else
+          apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
+        fi
+        _nvidia_reboot=true
+        ;;
+      yum|dnf)
+        _os_id="" _os_ver=""
+        [ -f /etc/os-release ] && { . /etc/os-release; _os_id="${ID}"; _os_ver="${VERSION_ID}"; }
+        "$PKG_MANAGER" install -y "kernel-devel-$(uname -r)" "kernel-headers-$(uname -r)" \
+          >> "$LOG_FILE" 2>&1 \
+          || "$PKG_MANAGER" install -y kernel-devel kernel-headers >> "$LOG_FILE" 2>&1 || true
+        "$PKG_MANAGER" install -y dkms >> "$LOG_FILE" 2>&1 || true
+        _cuda_repo=""
+        case "${_os_id}" in
+          amzn)
+            case "${_os_ver}" in
+              2)    _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo" ;;
+              202*) _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo" ;;
+            esac ;;
+          rhel|centos|rocky|almalinux)
+            _major="${_os_ver%%.*}"
+            _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel${_major}/x86_64/cuda-rhel${_major}.repo" ;;
+          fedora)
+            _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora${_os_ver}/x86_64/cuda-fedora${_os_ver}.repo" ;;
+        esac
+        if [ -n "$_cuda_repo" ]; then
+          info "Adding NVIDIA CUDA repository..."
+          _major="${_os_ver%%.*}"
+          curl -fsSL "$_cuda_repo" -o /etc/yum.repos.d/cuda-nvidia.repo >> "$LOG_FILE" 2>&1 || true
+          "$PKG_MANAGER" clean expire-cache >> "$LOG_FILE" 2>&1 || true
+          info "Installing cuda-drivers (this may take several minutes)..."
+          if [ "${_major}" -ge 10 ] 2>/dev/null; then
+            "$PKG_MANAGER" install -y cuda-drivers --nobest --skip-broken >> "$LOG_FILE" 2>&1 || true
+          elif command -v dnf &>/dev/null; then
+            dnf module install -y "nvidia-driver:latest-dkms" >> "$LOG_FILE" 2>&1 \
+              || dnf install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
+          else
+            yum install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
+          fi
+        else
+          warn "Unrecognised OS (${_os_id} ${_os_ver}) — skipping NVIDIA repo setup."
+        fi
+        _nvidia_reboot=true
+        ;;
+    esac
+
+    modprobe nvidia >> "$LOG_FILE" 2>&1 || true
+    sleep 2
+
+    if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
+      _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+      success "NVIDIA drivers active — GPU detected: ${_gpu_name}"
+    elif $_nvidia_reboot; then
+      warn "NVIDIA drivers installed — a reboot is required to activate the kernel module."
+      warn "After reboot, Ollama will detect the GPU automatically."
+      warn "  → Installation continues; Ollama will run on CPU until you reboot."
+    else
+      warn "NVIDIA driver installation may not have completed. Check: ${LOG_FILE}"
+    fi
   fi
 fi
 
 # ── 4/5 Install ZettaBrain RAG via pipx ──────────────────────
 step "4/5" "Installing ZettaBrain RAG"
 
-# Ensure pipx is available — prefer the apt/system version installed above;
-# fall back to pip with --break-system-packages for Ubuntu 23.04+ / Debian 12+
-# which block `pip install` into the system Python by default.
 _ensure_pipx() {
-  # Already on PATH — done
   if command -v pipx &>/dev/null; then return 0; fi
-
   info "Installing pipx..."
-
-  # Try apt / dnf / yum package first (safest on modern distros)
   case "$PKG_MANAGER" in
+    brew)
+      brew install pipx >> "$LOG_FILE" 2>&1 || true
+      eval "$(brew --prefix)/bin/pipx" ensurepath >> "$LOG_FILE" 2>&1 || true
+      export PATH="$(brew --prefix)/bin:$HOME/.local/bin:$PATH"
+      hash -r 2>/dev/null || true
+      command -v pipx &>/dev/null && return 0 ;;
     apt)
       if apt-get install -y -qq pipx >> "$LOG_FILE" 2>&1; then
         hash -r 2>/dev/null || true
@@ -293,10 +316,7 @@ _ensure_pipx() {
         command -v pipx &>/dev/null && return 0
       fi ;;
   esac
-
-  # pip fallback — use --break-system-packages to bypass the
-  # "externally-managed-environment" guard on Ubuntu 23.04+ / Debian 12+
-  info "apt pipx not available — installing via pip..."
+  info "Package manager pipx unavailable — installing via pip..."
   if "$PYTHON_BIN" -m pip install --quiet --break-system-packages --upgrade pipx \
        >> "$LOG_FILE" 2>&1; then
     "$PYTHON_BIN" -m pipx ensurepath >> "$LOG_FILE" 2>&1 || true
@@ -304,8 +324,6 @@ _ensure_pipx() {
     hash -r 2>/dev/null || true
     command -v pipx &>/dev/null && return 0
   fi
-
-  # Last resort: user-level install without --break-system-packages
   "$PYTHON_BIN" -m pip install --quiet --user --upgrade pipx >> "$LOG_FILE" 2>&1 || true
   "$PYTHON_BIN" -m pipx ensurepath >> "$LOG_FILE" 2>&1 || true
   export PATH="$HOME/.local/bin:$PATH"
@@ -316,8 +334,6 @@ _ensure_pipx() {
 _ensure_pipx
 success "pipx $(pipx --version 2>/dev/null)"
 
-# Install or upgrade — always bypass pip cache so we get the true latest from PyPI
-# (pip cache can serve a stale wheel, requiring two runs to get a new release)
 echo ""
 if pipx list 2>/dev/null | grep -q "zettabrain-rag"; then
   info "Upgrading zettabrain-rag (downloading latest + dependencies)..."
@@ -332,11 +348,19 @@ else
 fi
 
 # ── Make CLI commands globally available ─────────────────────
-# pipx installs to ~/.local/bin which may not be in PATH (common on servers
-# and in sudo shells). Symlink every command into /usr/local/bin which is
-# always present, so `zettabrain-setup` works immediately without PATH changes.
 PIPX_BIN="$HOME/.local/bin"
-export PATH="$PIPX_BIN:/usr/local/bin:$PATH"
+if $_MACOS; then
+  # Prefer Homebrew bin dir — always on PATH, writable without sudo
+  if [ -d /opt/homebrew/bin ]; then
+    _GLOBAL_BIN="/opt/homebrew/bin"   # Apple Silicon
+  else
+    _GLOBAL_BIN="/usr/local/bin"      # Intel Mac
+  fi
+else
+  _GLOBAL_BIN="/usr/local/bin"
+fi
+
+export PATH="$PIPX_BIN:$_GLOBAL_BIN:$PATH"
 hash -r 2>/dev/null || true
 
 _ZB_CMDS=(zettabrain zettabrain-setup zettabrain-chat zettabrain-ingest \
@@ -346,30 +370,36 @@ _ZB_CMDS=(zettabrain zettabrain-setup zettabrain-chat zettabrain-ingest \
 for _cmd in "${_ZB_CMDS[@]}"; do
   _src="${PIPX_BIN}/${_cmd}"
   if [ -f "$_src" ]; then
-    ln -sf "$_src" "/usr/local/bin/${_cmd}"
+    ln -sf "$_src" "${_GLOBAL_BIN}/${_cmd}" 2>/dev/null || true
   fi
 done
 
-# Run the postinstall command via full path — refreshes symlinks for any new
-# commands added in this version, works even if PATH is not yet updated.
 if [ -f "${PIPX_BIN}/zettabrain-postinstall" ]; then
   "${PIPX_BIN}/zettabrain-postinstall" 2>/dev/null || true
 fi
 
-# Also persist ~/.local/bin in PATH for future interactive sessions
-for _profile in /root/.bashrc /root/.profile /root/.bash_profile \
-                /home/*/.bashrc /home/*/.profile; do
-  [ -f "$_profile" ] || continue
-  grep -qF "$PIPX_BIN" "$_profile" 2>/dev/null || \
-    echo "export PATH=\"$PIPX_BIN:\$PATH\"" >> "$_profile"
-done
+# Persist PATH for future sessions
+if $_MACOS; then
+  for _profile in "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc"; do
+    [ -f "$_profile" ] || continue
+    grep -qF "$PIPX_BIN" "$_profile" 2>/dev/null || \
+      echo "export PATH=\"$PIPX_BIN:\$PATH\"" >> "$_profile"
+  done
+else
+  for _profile in /root/.bashrc /root/.profile /root/.bash_profile \
+                  /home/*/.bashrc /home/*/.profile; do
+    [ -f "$_profile" ] || continue
+    grep -qF "$PIPX_BIN" "$_profile" 2>/dev/null || \
+      echo "export PATH=\"$PIPX_BIN:\$PATH\"" >> "$_profile"
+  done
+fi
 
 INSTALLED_VERSION=$(zettabrain --version 2>/dev/null \
   || pipx list 2>/dev/null | grep -oP 'zettabrain-rag \K[\d.]+' | head -1 \
   || echo "latest")
 echo ""
 success "ZettaBrain RAG installed: ${INSTALLED_VERSION}"
-info  "Commands available globally in /usr/local/bin"
+info  "Commands available globally in ${_GLOBAL_BIN}"
 
 # ── 5/5 Install Ollama ───────────────────────────────────────
 step "5/5" "Installing Ollama + embedding model"
@@ -377,19 +407,28 @@ step "5/5" "Installing Ollama + embedding model"
 if command -v ollama &>/dev/null; then
   info "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"
 else
-  # zstd was installed in step 2; guard here in case it was skipped
   command -v zstd &>/dev/null \
-    || die "zstd not found. Run: sudo ${PKG_MANAGER} install zstd — then re-run."
+    || die "zstd not found. Run: ${PKG_MANAGER} install zstd — then re-run."
   info "Installing Ollama (downloading ~60MB)..."
-  curl -fsSL https://ollama.com/install.sh | sh 2>&1 | sed 's/^/  /'
+  if $_MACOS; then
+    brew install ollama 2>&1 | sed 's/^/  /'
+  else
+    curl -fsSL https://ollama.com/install.sh | sh 2>&1 | sed 's/^/  /'
+  fi
   success "Ollama installed."
 fi
 
-systemctl enable ollama >> "$LOG_FILE" 2>&1 || true
-if ! systemctl is-active --quiet ollama 2>/dev/null; then
-  info "Starting Ollama service..."
-  systemctl start ollama >> "$LOG_FILE" 2>&1 || true
+# Start Ollama service
+if $_MACOS; then
+  brew services start ollama >> "$LOG_FILE" 2>&1 || true
   sleep 3
+else
+  systemctl enable ollama >> "$LOG_FILE" 2>&1 || true
+  if ! systemctl is-active --quiet ollama 2>/dev/null; then
+    info "Starting Ollama service..."
+    systemctl start ollama >> "$LOG_FILE" 2>&1 || true
+    sleep 3
+  fi
 fi
 
 info "Pulling embedding model: ${EMBED_MODEL} (~275MB)..."
@@ -408,8 +447,13 @@ echo -e "  Log file : ${GREEN}${LOG_FILE}${NC}"
 echo ""
 echo -e "${BOLD}  Next steps:${NC}"
 echo ""
-echo -e "  1. Run setup — storage, TLS, and model selection:"
-echo -e "     ${CYAN}sudo zettabrain-setup${NC}"
+if $_MACOS; then
+  echo -e "  1. Run setup — storage, TLS, and model selection:"
+  echo -e "     ${CYAN}zettabrain-setup${NC}"
+else
+  echo -e "  1. Run setup — storage, TLS, and model selection:"
+  echo -e "     ${CYAN}sudo zettabrain-setup${NC}"
+fi
 echo ""
 echo -e "  2. Launch the secure web GUI:"
 echo -e "     ${CYAN}zettabrain-server${NC}"
