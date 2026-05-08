@@ -1,7 +1,10 @@
 # ============================================================
 # ZettaBrain RAG — Windows Installer
-# Usage: irm https://zettabrain.app/install.ps1 | iex
+# Usage: [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://zettabrain.app/install.ps1 | iex
 # ============================================================
+
+# Force TLS 1.2 — required on Windows Server 2016 and older which default to TLS 1.0
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $ErrorActionPreference = "Stop"
 $EMBED_MODEL = "nomic-embed-text"
@@ -168,6 +171,9 @@ Write-Host "  +======================================================+" -Foregro
 Write-Host ""
 Write-Host "  Version  : $INSTALLED_VERSION" -ForegroundColor Green
 Write-Host "  Log file : $LOG_FILE" -ForegroundColor Green
+Write-Host ""
+Write-Host "  To reinstall/upgrade:" -ForegroundColor White
+Write-Host "  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://zettabrain.app/install.ps1 | iex" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Next steps:" -ForegroundColor White
 Write-Host ""
