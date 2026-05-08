@@ -3,7 +3,7 @@ name: Deploy install.sh to S3
 on:
   push:
     branches: [main]
-    paths: [install.sh]
+    paths: [install.sh, install.ps1]
   workflow_dispatch:
 
 jobs:
@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Upload install.sh to S3
+      - name: Upload installers to S3
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -20,6 +20,9 @@ jobs:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
           aws s3 cp install.sh "s3://${S3_BUCKET}/install.sh" \
+            --content-type "text/plain" \
+            --cache-control "no-cache, no-store, must-revalidate"
+          aws s3 cp install.ps1 "s3://${S3_BUCKET}/install.ps1" \
             --content-type "text/plain" \
             --cache-control "no-cache, no-store, must-revalidate"
 
@@ -32,4 +35,4 @@ jobs:
         run: |
           aws cloudfront create-invalidation \
             --distribution-id "${CLOUDFRONT_DISTRIBUTION_ID}" \
-            --paths "/install.sh"
+            --paths "/install.sh" "/install.ps1"
