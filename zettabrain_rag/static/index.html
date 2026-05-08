@@ -265,8 +265,9 @@
     <div class="topbar">
       <div class="topbar-title">ZettaBrain RAG</div>
       <div class="topbar-actions">
-        <button class="tab-btn active" id="tab-chat"   onclick="switchTab('chat')">💬 Chat</button>
-        <button class="tab-btn"        id="tab-ingest" onclick="switchTab('ingest')">📥 Ingest</button>
+        <button class="tab-btn active" id="tab-chat"     onclick="switchTab('chat')">💬 Chat</button>
+        <button class="tab-btn"        id="tab-ingest"   onclick="switchTab('ingest')">📥 Ingest</button>
+        <button class="tab-btn"        id="tab-settings" onclick="switchTab('settings')">⚙️ Settings</button>
       </div>
     </div>
 
@@ -341,6 +342,50 @@
               <div class="stat-lbl">NFS Documents</div>
             </div>
           </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ── SETTINGS PANEL ── -->
+    <div class="panel" id="panel-settings">
+      <div class="panel-content">
+
+        <div class="panel-section">
+          <h3>🤖 Active LLM Model</h3>
+          <p style="color:var(--text2); font-size:13px; margin-bottom:14px;">
+            Choose which installed model to use for chat. Applied immediately — no restart needed.
+          </p>
+          <div class="form-row">
+            <select class="select input-field" id="settings-model-select" style="flex:1; height:34px;"></select>
+            <button class="btn btn-primary" onclick="applyModel()">Apply</button>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3>📂 Documents Folder</h3>
+          <p style="color:var(--text2); font-size:13px; margin-bottom:14px;">
+            Set the folder ZettaBrain will scan when you run ingestion.
+          </p>
+          <div class="form-row">
+            <input class="input-field" id="settings-docs-folder" type="text"
+              placeholder="e.g. C:\Users\You\Documents  or  /home/you/docs" />
+            <button class="btn btn-primary" onclick="saveDocsFolder()">Save</button>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3>⬇️ Pull a New Model</h3>
+          <p style="color:var(--text2); font-size:13px; margin-bottom:14px;">
+            Download any model from Ollama's library. Browse models at
+            <a href="https://ollama.com/library" target="_blank" style="color:var(--accent)">ollama.com/library</a>.
+          </p>
+          <div class="form-row">
+            <input class="input-field" id="pull-model-name" type="text"
+              placeholder="e.g. llama3.2:3b  ·  mistral:7b  ·  phi3:mini" />
+            <button class="btn btn-primary" id="pull-btn" onclick="pullModel()">Pull</button>
+          </div>
+          <div class="log-box" id="pull-log" style="margin-top:14px; display:none; color:var(--text2);"></div>
         </div>
 
       </div>
@@ -778,13 +823,109 @@ document.getElementById('source-modal').addEventListener('click', e => {
 
 // ── Tabs ──────────────────────────────────────────────
 function switchTab(tab) {
-  document.getElementById('panel-chat').style.display   = tab === 'chat'   ? 'flex' : 'none';
-  document.getElementById('panel-ingest').style.display = tab === 'ingest' ? 'flex' : 'none';
-  document.getElementById('panel-chat').classList.toggle('active',   tab === 'chat');
-  document.getElementById('panel-ingest').classList.toggle('active', tab === 'ingest');
-  document.getElementById('tab-chat').classList.toggle('active',   tab === 'chat');
-  document.getElementById('tab-ingest').classList.toggle('active',  tab === 'ingest');
-  if (tab === 'ingest') refreshStatus();
+  ['chat', 'ingest', 'settings'].forEach(t => {
+    const panel = document.getElementById(`panel-${t}`);
+    const btn   = document.getElementById(`tab-${t}`);
+    if (panel) { panel.style.display = t === tab ? 'flex' : 'none'; panel.classList.toggle('active', t === tab); }
+    if (btn)   btn.classList.toggle('active', t === tab);
+  });
+  if (tab === 'ingest')   refreshStatus();
+  if (tab === 'settings') { refreshStatus().then(populateSettingsPanel); }
+}
+
+// ── Settings ──────────────────────────────────────────
+function populateSettingsPanel() {
+  const sel = document.getElementById('settings-model-select');
+  sel.innerHTML = '';
+  const models = (status.ollama && status.ollama.models) ? status.ollama.models : [];
+  const active = (status.ollama && status.ollama.active_llm) ? status.ollama.active_llm : currentModel;
+  if (models.length === 0) {
+    sel.innerHTML = '<option value="">No models installed</option>';
+  } else {
+    models.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m; opt.textContent = m;
+      if (m === active) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+  if (status.storage && status.storage.path) {
+    const folderEl = document.getElementById('settings-docs-folder');
+    if (!folderEl.value) folderEl.value = status.storage.path;
+  }
+}
+
+async function applyModel() {
+  const model = document.getElementById('settings-model-select').value;
+  if (!model) { toast('Select a model first', 'error'); return; }
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ llm_model: model })
+    });
+    const data = await r.json();
+    if (data.success) {
+      currentModel = model;
+      const sidebarSel = document.getElementById('model-select');
+      if (sidebarSel) { sidebarSel.value = model; }
+      toast(`LLM model set to ${model}`, 'success');
+    } else {
+      toast('Failed to apply model', 'error');
+    }
+  } catch(e) { toast('Request failed: ' + e.message, 'error'); }
+}
+
+async function saveDocsFolder() {
+  const folder = document.getElementById('settings-docs-folder').value.trim();
+  if (!folder) { toast('Enter a folder path', 'error'); return; }
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ docs_folder: folder })
+    });
+    const data = await r.json();
+    if (data.success) {
+      toast('Documents folder saved', 'success');
+      refreshStatus();
+    } else {
+      toast('Failed to save folder', 'error');
+    }
+  } catch(e) { toast('Request failed: ' + e.message, 'error'); }
+}
+
+async function pullModel() {
+  const modelName = document.getElementById('pull-model-name').value.trim();
+  if (!modelName) { toast('Enter a model name', 'error'); return; }
+  const btn = document.getElementById('pull-btn');
+  const log = document.getElementById('pull-log');
+  btn.disabled = true; btn.textContent = 'Pulling...';
+  log.style.display = 'block';
+  log.textContent = `Pulling ${modelName}...\n`;
+  try {
+    const r = await fetch('/api/pull', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelName })
+    });
+    if (!r.ok) { throw new Error(`Server error ${r.status}`); }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      log.textContent += decoder.decode(value, { stream: true });
+      log.scrollTop = log.scrollHeight;
+    }
+    log.textContent += '\n✓ Done.';
+    toast(`${modelName} pulled successfully`, 'success');
+    await refreshStatus();
+    populateSettingsPanel();
+  } catch(e) {
+    log.textContent += '\n❌ ' + e.message;
+    toast('Pull failed', 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Pull';
+    log.scrollTop = log.scrollHeight;
+  }
 }
 
 // ── Toasts ────────────────────────────────────────────

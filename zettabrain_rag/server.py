@@ -15,7 +15,7 @@ from typing import Optional
 
 import requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,10 +25,16 @@ from .retrieval import hybrid_retrieve, RAG_PROMPT, format_context
 # -------------------------------------------------------
 # Paths
 # -------------------------------------------------------
-PKG_DIR      = Path(__file__).parent
-STATIC_DIR   = PKG_DIR / "static"
-DEPLOY_DIR   = Path("/opt/zettabrain/src")
-CERT_DIR     = Path("/opt/zettabrain/certs")
+PKG_DIR    = Path(__file__).parent
+STATIC_DIR = PKG_DIR / "static"
+
+if os.name == "nt":
+    _local_app = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    DEPLOY_DIR = _local_app / "ZettaBrain"
+    CERT_DIR   = _local_app / "ZettaBrain" / "certs"
+else:
+    DEPLOY_DIR = Path("/opt/zettabrain/src")
+    CERT_DIR   = Path("/opt/zettabrain/certs")
 CHROMA_PATH  = DEPLOY_DIR / "zettabrain_vectorstore"
 INGEST_LOG   = DEPLOY_DIR / "ingested_files.json"
 CONFIG_FILE  = DEPLOY_DIR / "zettabrain.env"
@@ -177,6 +183,13 @@ class ChatRequest(BaseModel):
 class IngestRequest(BaseModel):
     folder: Optional[str] = None
     rebuild: bool = False
+
+class SettingsRequest(BaseModel):
+    llm_model: Optional[str] = None
+    docs_folder: Optional[str] = None
+
+class PullRequest(BaseModel):
+    model: str
 
 
 # -------------------------------------------------------
@@ -329,6 +342,92 @@ async def get_models():
 @app.get("/api/sources")
 async def get_sources():
     return {"sources": _get_sources()}
+
+
+@app.post("/api/settings")
+async def save_settings(req: SettingsRequest):
+    global LLM_MODEL, DOCS_FOLDER
+    updated = {}
+
+    if req.llm_model:
+        LLM_MODEL = req.llm_model
+        updated["llm_model"] = LLM_MODEL
+    if req.docs_folder:
+        DOCS_FOLDER = req.docs_folder
+        updated["docs_folder"] = DOCS_FOLDER
+
+    try:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cfg: dict[str, str] = {}
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text(encoding="utf-8").splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip().strip('"')
+        if req.llm_model:
+            cfg["ZETTABRAIN_LLM_MODEL"] = req.llm_model
+        if req.docs_folder:
+            cfg["RAG_DATA_PATH"] = req.docs_folder
+        CONFIG_FILE.write_text(
+            "\n".join(f'{k}="{v}"' for k, v in cfg.items()) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save config: {e}")
+
+    return {"success": True, "updated": updated}
+
+
+@app.post("/api/pull")
+async def pull_model(req: PullRequest):
+    """Stream ollama pull progress back to the client as plain text."""
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    def _do_pull():
+        try:
+            resp = requests.post(
+                f"{OLLAMA_URL}/api/pull",
+                json={"name": req.model, "stream": True},
+                stream=True,
+                timeout=600,
+            )
+            if resp.status_code != 200:
+                asyncio.run_coroutine_threadsafe(
+                    queue.put(f"Error: Ollama returned {resp.status_code}\n"), loop
+                )
+                return
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                    status_msg = chunk.get("status", "")
+                    if chunk.get("total") and chunk.get("completed") is not None:
+                        pct = int(chunk["completed"] / chunk["total"] * 100)
+                        msg = f"{status_msg} {pct}%\n"
+                    elif status_msg:
+                        msg = f"{status_msg}\n"
+                    else:
+                        continue
+                    asyncio.run_coroutine_threadsafe(queue.put(msg), loop)
+                except Exception:
+                    pass
+        except Exception as exc:
+            asyncio.run_coroutine_threadsafe(queue.put(f"Error: {exc}\n"), loop)
+        finally:
+            asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+    loop.run_in_executor(None, _do_pull)
+
+    async def _gen():
+        while True:
+            msg = await queue.get()
+            if msg is None:
+                break
+            yield msg
+
+    return StreamingResponse(_gen(), media_type="text/plain")
 
 
 @app.post("/api/ingest")

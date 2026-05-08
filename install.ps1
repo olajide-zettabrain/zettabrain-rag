@@ -11,6 +11,7 @@
 # Critical failures are caught explicitly with $LASTEXITCODE or try/catch.
 $ErrorActionPreference = "Continue"
 $EMBED_MODEL = "nomic-embed-text"
+$LLM_MODEL   = "llama3.2:3b"
 $LOG_FILE = "$env:LOCALAPPDATA\ZettaBrain\install.log"
 
 New-Item -ItemType Directory -Force -Path (Split-Path $LOG_FILE) | Out-Null
@@ -206,6 +207,11 @@ if (-not $ollamaRunning) {
 Info "Pulling embedding model: $EMBED_MODEL (~275MB)..."
 & ollama pull $EMBED_MODEL 2>&1 | ForEach-Object { "  $_" }
 OK "Embedding model ready."
+
+Info "Pulling default LLM: $LLM_MODEL (~2GB — this takes a few minutes)..."
+Write-Host "  (You can change the LLM later in the web GUI settings)" -ForegroundColor DarkGray
+& ollama pull $LLM_MODEL 2>&1 | ForEach-Object { "  $_" }
+OK "LLM model ready."
 
 # ── Done ─────────────────────────────────────────────────────
 Write-Host ""
