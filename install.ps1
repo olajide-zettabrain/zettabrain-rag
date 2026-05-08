@@ -116,7 +116,8 @@ $PIPX = if (Get-Command pipx -EA SilentlyContinue) { "pipx" }
 OK "pipx $(& $PIPX --version 2>$null)"
 
 Write-Host ""
-$zbInstalled = & $PIPX list 2>$null | Select-String "zettabrain-rag"
+# 2>&1 merges stderr into stdout so "nothing has been installed" doesn't throw
+$zbInstalled = (& $PIPX list 2>&1) | Select-String "zettabrain-rag"
 if ($zbInstalled) {
     Info "Upgrading zettabrain-rag (downloading latest + dependencies)..."
     Write-Host "  (This can take 2-5 minutes — please wait)"
@@ -147,7 +148,7 @@ OK "ZettaBrain RAG installed: $INSTALLED_VERSION"
 Step "5/5" "Installing Ollama + embedding model"
 
 if (Get-Command ollama -EA SilentlyContinue) {
-    Info "Ollama already installed: $(ollama --version 2>$null | Select-Object -First 1)"
+    Info "Ollama already installed: $((ollama --version 2>&1) | Select-Object -First 1)"
 } else {
     Info "Installing Ollama..."
     if ($hasWinget) {
