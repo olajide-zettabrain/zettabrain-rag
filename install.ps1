@@ -116,8 +116,9 @@ $PIPX = if (Get-Command pipx -EA SilentlyContinue) { "pipx" }
 OK "pipx $(& $PIPX --version 2>$null)"
 
 Write-Host ""
-# 2>&1 merges stderr into stdout so "nothing has been installed" doesn't throw
-$zbInstalled = (& $PIPX list 2>&1) | Select-String "zettabrain-rag"
+# pipx list exits non-zero when nothing installed — catch so Stop mode doesn't abort
+$zbInstalled = $false
+try { $zbInstalled = [bool]((& $PIPX list 2>&1) | Select-String "zettabrain-rag") } catch { }
 if ($zbInstalled) {
     Info "Upgrading zettabrain-rag (downloading latest + dependencies)..."
     Write-Host "  (This can take 2-5 minutes — please wait)"
