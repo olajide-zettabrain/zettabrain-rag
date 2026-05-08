@@ -360,20 +360,27 @@ step "5/5" "Installing Ollama + embedding model"
 if command -v ollama &>/dev/null; then
   info "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"
 else
-  # zstd required by Ollama's installer for archive extraction
+  # zstd is required by Ollama's installer for archive extraction.
+  # Install it explicitly per distro so the output is visible and errors surface.
   if ! command -v zstd &>/dev/null; then
     info "Installing zstd (required by Ollama)..."
     case "$PKG_MANAGER" in
       apt)
-        apt-get update -qq >> "$LOG_FILE" 2>&1 || true
-        apt-get install -y zstd >> "$LOG_FILE" 2>&1 || true ;;
-      yum|dnf)
-        "$PKG_MANAGER" install -y zstd >> "$LOG_FILE" 2>&1 || true ;;
+        apt-get update -qq 2>&1 | sed 's/^/  /' || true
+        apt-get install -y zstd 2>&1 | sed 's/^/  /' || true
+        ;;
+      dnf)
+        dnf install -y zstd 2>&1 | sed 's/^/  /' || true
+        ;;
+      yum)
+        yum install -y zstd 2>&1 | sed 's/^/  /' || true
+        ;;
     esac
+    # Abort now rather than let Ollama fail mid-extraction
     if ! command -v zstd &>/dev/null; then
-      warn "Could not install zstd automatically. Ollama extraction may fail."
-      warn "Fix manually: sudo ${PKG_MANAGER} install zstd"
+      die "zstd could not be installed. Run manually: sudo ${PKG_MANAGER} install zstd — then re-run this installer."
     fi
+    success "zstd installed."
   fi
   info "Installing Ollama (downloading ~60MB)..."
   curl -fsSL https://ollama.com/install.sh | sh 2>&1 | sed 's/^/  /'
