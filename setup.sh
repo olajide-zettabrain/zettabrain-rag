@@ -80,6 +80,54 @@ echo -e "  ${CYAN}sudo zettabrain-storage add${NC}"
 echo ""
 
 # -------------------------------------------------------
+# PACKAGE MANAGER DETECTION (used throughout setup)
+# -------------------------------------------------------
+_PM=""
+command -v apt-get &>/dev/null && _PM="apt"
+command -v dnf     &>/dev/null && _PM="dnf"
+command -v yum     &>/dev/null && _PM="${_PM:-yum}"
+
+# Detect OS ID for distro-specific paths
+_OS_ID=""; _OS_VER=""
+[ -f /etc/os-release ] && { . /etc/os-release; _OS_ID="${ID:-}"; _OS_VER="${VERSION_ID:-}"; }
+
+# ── Install helper (uses top-level _PM) ─────────────────
+_install() { [ -n "$_PM" ] && "$_PM" install -y "$@" >> "$LOG_FILE" 2>&1 || true; }
+
+# ── SELinux helper ───────────────────────────────────────
+# Called before storage mounts and before server launch.
+_selinux_permissive_check() {
+  command -v getenforce &>/dev/null || return 0
+  local _mode; _mode=$(getenforce 2>/dev/null)
+  if [ "$_mode" = "Enforcing" ]; then
+    info "SELinux is Enforcing — configuring required policies..."
+    setsebool -P use_nfs_home_dirs      1 >> "$LOG_FILE" 2>&1 || true
+    setsebool -P use_samba_home_dirs    1 >> "$LOG_FILE" 2>&1 || true
+    setsebool -P use_fusefs_home_dirs   1 >> "$LOG_FILE" 2>&1 || true
+    setsebool -P httpd_can_network_connect 1 >> "$LOG_FILE" 2>&1 || true
+    # Allow the ZettaBrain server to bind and accept connections on port 7860
+    if command -v semanage &>/dev/null; then
+      semanage port -a -t http_port_t -p tcp 7860 >> "$LOG_FILE" 2>&1 || true
+    fi
+    success "SELinux policies configured."
+  fi
+}
+
+# ── Firewall helper ──────────────────────────────────────
+# Opens a TCP port in firewalld (RHEL/Fedora) or ufw (Ubuntu).
+_open_port() {
+  local _port="$1"
+  if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --add-port="${_port}/tcp" --permanent >> "$LOG_FILE" 2>&1 || true
+    firewall-cmd --reload >> "$LOG_FILE" 2>&1 || true
+    success "Firewall: port ${_port}/tcp opened via firewalld."
+  elif command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "${_port}/tcp" >> "$LOG_FILE" 2>&1 || true
+    success "Firewall: port ${_port}/tcp opened via ufw."
+  fi
+}
+
+# -------------------------------------------------------
 # STEP 1/6 — SELECT PRIMARY STORAGE TYPE
 # -------------------------------------------------------
 step "Step 1/6: Select Primary Storage Type"
@@ -170,16 +218,19 @@ if [ "$STORAGE_TYPE" = "nfs" ]; then
 
   # Install NFS client
   info "Installing NFS client packages..."
-  if command -v apt-get &>/dev/null; then
-    apt-get update -qq 2>/dev/null
-    apt-get install -y -qq nfs-common netcat-openbsd 2>/dev/null
-  elif command -v yum &>/dev/null; then
-    yum install -y -q nfs-utils nmap-ncat 2>/dev/null
-  elif command -v dnf &>/dev/null; then
-    dnf install -y -q nfs-utils nmap-ncat 2>/dev/null
-  else
-    warn "Cannot detect package manager — assuming NFS client is installed."
-  fi
+  case "$_PM" in
+    apt)
+      apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+      _install nfs-common netcat-openbsd
+      ;;
+    dnf|yum)
+      _install nfs-utils nmap-ncat
+      ;;
+    *)
+      warn "Cannot detect package manager — assuming NFS client is installed."
+      ;;
+  esac
+  _selinux_permissive_check
   success "NFS client ready."
   echo ""
 
@@ -272,16 +323,19 @@ if [ "$STORAGE_TYPE" = "smb" ]; then
 
   # Install cifs-utils
   info "Installing SMB client (cifs-utils)..."
-  if command -v apt-get &>/dev/null; then
-    apt-get update -qq 2>/dev/null
-    apt-get install -y -qq cifs-utils netcat-openbsd 2>/dev/null
-  elif command -v yum &>/dev/null; then
-    yum install -y -q cifs-utils nmap-ncat 2>/dev/null
-  elif command -v dnf &>/dev/null; then
-    dnf install -y -q cifs-utils nmap-ncat 2>/dev/null
-  else
-    warn "Cannot detect package manager — assuming cifs-utils is installed."
-  fi
+  case "$_PM" in
+    apt)
+      apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+      _install cifs-utils netcat-openbsd
+      ;;
+    dnf|yum)
+      _install cifs-utils nmap-ncat
+      ;;
+    *)
+      warn "Cannot detect package manager — assuming cifs-utils is installed."
+      ;;
+  esac
+  _selinux_permissive_check
   success "SMB client ready."
   echo ""
 
@@ -395,12 +449,13 @@ if [ "$STORAGE_TYPE" = "smb" ]; then
 fi
 
 # ================================================================
-# ── OPTION 4: S3-COMPATIBLE OBJECT STORAGE ───────────────────────
+# ── OPTION 4: S3-COMPATIBLE OBJECT STORAGE (s3fs-fuse) ──────────
 # ================================================================
 if [ "$STORAGE_TYPE" = "s3" ]; then
 
   step "Object Storage Configuration"
-  echo -e "  Supports MinIO, AWS S3, Backblaze B2, and any S3-compatible endpoint.\n"
+  echo -e "  Supports MinIO, AWS S3, Backblaze B2, and any S3-compatible endpoint."
+  echo -e "  The bucket is mounted via s3fs-fuse — files are streamed on demand,\n  no bulk download required.\n"
 
   read -rp "  Endpoint URL (e.g. http://minio:9000 or https://s3.amazonaws.com): " S3_ENDPOINT
   [ -z "$S3_ENDPOINT" ] && error "Endpoint URL is required."
@@ -417,42 +472,94 @@ if [ "$STORAGE_TYPE" = "s3" ]; then
   echo ""
   [ -z "$S3_SECRET_KEY" ] && error "Secret key is required."
 
-  # Local cache dir — files synced from bucket before ingestion
-  S3_CACHE_DIR="/opt/zettabrain/s3-cache"
-  mkdir -p "$S3_CACHE_DIR"
+  # ── Install s3fs-fuse ────────────────────────────────────────
+  info "Installing s3fs-fuse..."
+  if command -v s3fs &>/dev/null; then
+    success "s3fs already installed: $(s3fs --version 2>&1 | head -1)"
+  else
+    case "$_PM" in
+      apt)
+        apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+        apt-get install -y s3fs >> "$LOG_FILE" 2>&1 || true
+        ;;
+      dnf|yum)
+        # Try direct install first, then EPEL
+        "${_PM}" install -y s3fs-fuse >> "$LOG_FILE" 2>&1 \
+          || { "${_PM}" install -y epel-release >> "$LOG_FILE" 2>&1 || true
+               "${_PM}" install -y s3fs-fuse >> "$LOG_FILE" 2>&1 || true; }
+        ;;
+      *)
+        error "Cannot detect package manager. Install s3fs-fuse manually: https://github.com/s3fs-fuse/s3fs-fuse"
+        exit 1
+        ;;
+    esac
 
-  # Verify connectivity using Python boto3 (installed as part of zettabrain-rag)
-  info "Testing connection to ${S3_ENDPOINT}/${S3_BUCKET}..."
-  _s3_test_py=$(cat <<PYEOF
-import sys
-try:
-    import boto3
-    from botocore.client import Config
-    s3 = boto3.client('s3',
-        endpoint_url='${S3_ENDPOINT}',
-        aws_access_key_id='${S3_ACCESS_KEY}',
-        aws_secret_access_key='${S3_SECRET_KEY}',
-        config=Config(signature_version='s3v4'),
-    )
-    s3.head_bucket(Bucket='${S3_BUCKET}')
-    print('ok')
-except ImportError:
-    print('no_boto3')
-except Exception as e:
-    print(f'error:{e}')
-PYEOF
-)
-  _s3_result=$(python3 -c "$_s3_test_py" 2>/dev/null || echo "error:python failed")
-  case "$_s3_result" in
-    ok)         success "Object storage connection verified." ;;
-    no_boto3)   warn "boto3 not found — connection not verified. Run: pipx inject zettabrain-rag boto3" ;;
-    error:*)    warn "Could not connect: ${_s3_result#error:}"
-                warn "Check endpoint URL, credentials, and bucket name." ;;
-  esac
+    if ! command -v s3fs &>/dev/null; then
+      error "s3fs-fuse not found after install. Check ${LOG_FILE} for details."
+      error "Manual install: apt-get install s3fs  OR  dnf install s3fs-fuse"
+      exit 1
+    fi
+    success "s3fs-fuse installed: $(s3fs --version 2>&1 | head -1)"
+  fi
 
-  PRIMARY_PATH="$S3_CACHE_DIR"
-  STORAGE_LABEL="s3:${S3_ENDPOINT}/${S3_BUCKET}"
-  info "Documents will be synced from bucket to: ${S3_CACHE_DIR}"
+  # ── Credentials file ─────────────────────────────────────────
+  _S3FS_PASSWD="/etc/passwd-s3fs"
+  echo "${S3_ACCESS_KEY}:${S3_SECRET_KEY}" > "$_S3FS_PASSWD"
+  chmod 600 "$_S3FS_PASSWD"
+  success "Credentials written to ${_S3FS_PASSWD}"
+
+  # ── Mount point ───────────────────────────────────────────────
+  S3_MOUNT_POINT="/opt/zettabrain/s3-mount"
+  mkdir -p "$S3_MOUNT_POINT"
+
+  # Unmount any existing mount at this path before remounting
+  if mountpoint -q "$S3_MOUNT_POINT" 2>/dev/null; then
+    umount "$S3_MOUNT_POINT" 2>/dev/null || fusermount -u "$S3_MOUNT_POINT" 2>/dev/null || true
+  fi
+
+  # Build s3fs options — path-style for MinIO and non-AWS endpoints
+  _S3FS_OPTS="use_path_request_style,allow_other,ro,passwd_file=${_S3FS_PASSWD}"
+  _S3FS_OPTS="${_S3FS_OPTS},url=${S3_ENDPOINT}"
+
+  # Enable allow_other in fuse config
+  if ! grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null; then
+    echo "user_allow_other" >> /etc/fuse.conf
+  fi
+
+  info "Mounting s3://${S3_BUCKET} → ${S3_MOUNT_POINT}..."
+  if [ -n "$S3_PREFIX" ]; then
+    s3fs "${S3_BUCKET}:/${S3_PREFIX}" "$S3_MOUNT_POINT" -o "$_S3FS_OPTS" >> "$LOG_FILE" 2>&1
+  else
+    s3fs "$S3_BUCKET" "$S3_MOUNT_POINT" -o "$_S3FS_OPTS" >> "$LOG_FILE" 2>&1
+  fi
+
+  if mountpoint -q "$S3_MOUNT_POINT" 2>/dev/null; then
+    _file_count=$(find "$S3_MOUNT_POINT" -maxdepth 2 \( -name "*.pdf" -o -name "*.txt" -o -name "*.docx" -o -name "*.md" \) 2>/dev/null | wc -l)
+    success "Mounted — ${_file_count} supported document(s) visible."
+  else
+    warn "Mount attempt returned an error. Check ${LOG_FILE} for details."
+    warn "The mount will be retried on next boot via fstab."
+  fi
+
+  # ── fstab entry (persistent across reboots) ──────────────────
+  if [ -n "$S3_PREFIX" ]; then
+    _fstab_s3_src="${S3_BUCKET}:/${S3_PREFIX}"
+  else
+    _fstab_s3_src="$S3_BUCKET"
+  fi
+  _fstab_s3_line="${_fstab_s3_src}  ${S3_MOUNT_POINT}  fuse.s3fs  ${_S3FS_OPTS},_netdev  0  0"
+
+  if grep -qF "$S3_BUCKET" "$FSTAB_FILE" 2>/dev/null; then
+    warn "fstab entry for ${S3_BUCKET} already exists — skipping."
+  else
+    cp "$FSTAB_FILE" "${FSTAB_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    { echo ""; echo "# ZettaBrain S3 FUSE — $(date '+%Y-%m-%d %H:%M:%S')"; echo "$_fstab_s3_line"; } >> "$FSTAB_FILE"
+    success "Added to /etc/fstab — mount persists after reboot."
+  fi
+
+  PRIMARY_PATH="$S3_MOUNT_POINT"
+  STORAGE_LABEL="s3://${S3_BUCKET}"
+  info "Documents will be read from mount: ${S3_MOUNT_POINT}"
 
 fi
 
@@ -463,29 +570,33 @@ fi
 # ================================================================
 step "Step 2/6: Installing NVIDIA drivers"
 
-# Detect package manager
-_PM=""
-command -v apt-get &>/dev/null && _PM="apt"
-command -v dnf     &>/dev/null && _PM="dnf"
-command -v yum     &>/dev/null && _PM="${_PM:-yum}"
+# Detect NVIDIA GPU hardware first — skip entirely if none present
+_has_nvidia=false
+_install pciutils >> "$LOG_FILE" 2>&1 || true
+if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
+  _has_nvidia=true
+elif command -v lspci &>/dev/null && lspci 2>/dev/null | grep -qi "nvidia"; then
+  _has_nvidia=true
+elif [ -d /proc/driver/nvidia ]; then
+  _has_nvidia=true
+fi
 
 if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
   _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
   success "NVIDIA drivers already active: ${_gpu_name}"
+elif ! $_has_nvidia; then
+  info "No NVIDIA GPU detected — skipping driver installation. Ollama will use CPU."
 elif [ -z "$_PM" ]; then
   warn "Cannot detect package manager — skipping NVIDIA driver install."
-  warn "Install manually: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/"
 else
-  info "Installing NVIDIA GPU drivers (ensures GPU is usable with Ollama)..."
+  info "NVIDIA GPU detected — installing drivers..."
   _nvidia_reboot=false
 
   case "$_PM" in
     apt)
-      apt-get install -y -qq pciutils >> "$LOG_FILE" 2>&1 || true
       apt-get install -y -qq "linux-headers-$(uname -r)" 2>/dev/null \
         || apt-get install -y -qq linux-headers-generic >> "$LOG_FILE" 2>&1 || true
       apt-get install -y -qq ubuntu-drivers-common >> "$LOG_FILE" 2>&1 || true
-
       if command -v ubuntu-drivers &>/dev/null; then
         info "Running ubuntu-drivers autoinstall (this may take a few minutes)..."
         ubuntu-drivers autoinstall >> "$LOG_FILE" 2>&1 \
@@ -497,44 +608,45 @@ else
       ;;
 
     yum|dnf)
-      _os_id="" _os_ver=""
-      [ -f /etc/os-release ] && { . /etc/os-release; _os_id="${ID}"; _os_ver="${VERSION_ID}"; }
-
+      # Kernel headers for DKMS
       "$_PM" install -y "kernel-devel-$(uname -r)" "kernel-headers-$(uname -r)" \
         >> "$LOG_FILE" 2>&1 \
         || "$_PM" install -y kernel-devel kernel-headers >> "$LOG_FILE" 2>&1 || true
-      "$_PM" install -y pciutils >> "$LOG_FILE" 2>&1 || true
+      # dkms is required by kmod-nvidia on RHEL 8/9
+      "$_PM" install -y dkms >> "$LOG_FILE" 2>&1 || true
 
       _cuda_repo=""
-      case "${_os_id}" in
+      case "${_OS_ID}" in
         amzn)
-          case "${_os_ver}" in
+          case "${_OS_VER}" in
             2)    _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo" ;;
             202*) _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo" ;;
           esac ;;
         rhel|centos|rocky|almalinux)
-          _major="${_os_ver%%.*}"
+          _major="${_OS_VER%%.*}"
           _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel${_major}/x86_64/cuda-rhel${_major}.repo" ;;
         fedora)
-          _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora${_os_ver}/x86_64/cuda-fedora${_os_ver}.repo" ;;
+          _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora${_OS_VER}/x86_64/cuda-fedora${_OS_VER}.repo" ;;
       esac
 
       if [ -n "$_cuda_repo" ]; then
         info "Adding NVIDIA CUDA repository..."
-        if command -v dnf &>/dev/null; then
-          dnf config-manager --add-repo "$_cuda_repo" >> "$LOG_FILE" 2>&1 || true
-          dnf clean expire-cache >> "$LOG_FILE" 2>&1 || true
-          info "Installing cuda-drivers (this may take several minutes)..."
-          dnf module install -y "nvidia-driver:latest-dkms" >> "$LOG_FILE" 2>&1 \
-            || dnf install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
+        # DNF5 (RHEL 10+) dropped config-manager --add-repo; use repo file directly
+        curl -fsSL "$_cuda_repo" -o /etc/yum.repos.d/cuda-nvidia.repo >> "$LOG_FILE" 2>&1 || true
+        "$_PM" clean expire-cache >> "$LOG_FILE" 2>&1 || true
+        info "Installing cuda-drivers (this may take several minutes)..."
+        # RHEL 10 / DNF5: modularity removed — use direct package + --nobest fallback
+        _major="${_OS_VER%%.*}"
+        if [ "${_major}" -ge 10 ] 2>/dev/null; then
+          "$_PM" install -y cuda-drivers --nobest --skip-broken >> "$LOG_FILE" 2>&1 || true
         else
-          yum-config-manager --add-repo "$_cuda_repo" >> "$LOG_FILE" 2>&1 || true
-          yum clean expire-cache >> "$LOG_FILE" 2>&1 || true
-          info "Installing cuda-drivers (this may take several minutes)..."
-          yum install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
+          # RHEL 8/9: try module stream first, fall back to direct package
+          "$_PM" module install -y "nvidia-driver:latest-dkms" >> "$LOG_FILE" 2>&1 \
+            || "$_PM" install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
         fi
       else
-        warn "Unrecognised OS (${_os_id} ${_os_ver}) — skipping NVIDIA repo setup."
+        warn "Unrecognised OS (${_OS_ID} ${_OS_VER}) — skipping NVIDIA repo setup."
+        warn "Install drivers manually: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/"
       fi
       _nvidia_reboot=true
       ;;
@@ -550,8 +662,6 @@ else
     warn "NVIDIA drivers installed — reboot required to activate the kernel module."
     warn "After reboot, run: sudo systemctl restart ollama"
     warn "  → Continuing; Ollama will use CPU until reboot."
-  else
-    warn "NVIDIA driver install may not have completed. Check: ${LOG_FILE}"
   fi
 fi
 
@@ -559,6 +669,19 @@ fi
 # STEP 3/6 — INSTALL OLLAMA
 # ================================================================
 step "Step 3/6: Installing Ollama"
+
+# zstd is required by Ollama's installer for archive extraction
+if ! command -v zstd &>/dev/null; then
+  info "Installing zstd (required by Ollama)..."
+  case "$_PM" in
+    apt)
+      apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+      apt-get install -y zstd >> "$LOG_FILE" 2>&1 || true ;;
+    dnf|yum)
+      "$_PM" install -y zstd >> "$LOG_FILE" 2>&1 || true ;;
+  esac
+  command -v zstd &>/dev/null || warn "zstd install failed — Ollama extraction may fail."
+fi
 
 if command -v ollama &>/dev/null; then
   info "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"
@@ -765,17 +888,14 @@ ZETTABRAIN_TUNNEL_ENABLED=false
 ZETTABRAIN_TLS_PROVIDER="${ZETTABRAIN_TLS_PROVIDER:-self-signed}"
 ENVEOF
 
-# Append S3 credentials if object storage was selected
+# Append S3 FUSE mount config if object storage was selected
 if [ "${STORAGE_TYPE}" = "s3" ]; then
   cat >> "$CONFIG_FILE" << S3EOF
 
-# --- Object Storage ---
-ZETTABRAIN_S3_ENDPOINT="${S3_ENDPOINT}"
+# --- Object Storage (s3fs-fuse mount) ---
+ZETTABRAIN_S3_MOUNT="${S3_MOUNT_POINT}"
 ZETTABRAIN_S3_BUCKET="${S3_BUCKET}"
 ZETTABRAIN_S3_PREFIX="${S3_PREFIX:-}"
-ZETTABRAIN_S3_ACCESS_KEY="${S3_ACCESS_KEY}"
-ZETTABRAIN_S3_SECRET_KEY="${S3_SECRET_KEY}"
-ZETTABRAIN_S3_CACHE_DIR="${S3_CACHE_DIR}"
 S3EOF
 fi
 
@@ -834,22 +954,26 @@ if [ "$ZETTABRAIN_TLS_PROVIDER" = "caddy" ]; then
       apt-get update -qq && apt-get install -y -qq caddy
       ;;
     amzn|rhel|centos|fedora|rocky|almalinux)
-      _PM="yum"; command -v dnf &>/dev/null && _PM="dnf"
-      "$_PM" install -y 'dnf-command(copr)' 2>/dev/null || true
-      "$_PM" copr enable -y @caddy/caddy 2>/dev/null \
-        || "$_PM" install -y caddy 2>/dev/null \
-        || { info "Falling back to Caddy binary install...";
-             _caddy_ver=$(curl -sL https://api.github.com/repos/caddyserver/caddy/releases/latest \
-               | grep '"tag_name"' | cut -d'"' -f4);
-             curl -sL "https://github.com/caddyserver/caddy/releases/download/${_caddy_ver}/caddy_${_caddy_ver#v}_linux_amd64.tar.gz" \
-               | tar xz -C /usr/local/bin caddy; }
+      # dnf-plugins-core provides `dnf copr` and `dnf config-manager`
+      "$_PM" install -y dnf-plugins-core >> "$LOG_FILE" 2>&1 || true
+      # Try COPR repo first, then direct package, then binary fallback
+      if ! "$_PM" copr enable -y @caddy/caddy >> "$LOG_FILE" 2>&1 \
+           || ! "$_PM" install -y caddy >> "$LOG_FILE" 2>&1; then
+        if ! "$_PM" install -y caddy >> "$LOG_FILE" 2>&1; then
+          info "Falling back to Caddy binary install..."
+          _caddy_ver=$(curl -sL https://api.github.com/repos/caddyserver/caddy/releases/latest \
+            | grep '"tag_name"' | cut -d'"' -f4)
+          curl -sL "https://github.com/caddyserver/caddy/releases/download/${_caddy_ver}/caddy_${_caddy_ver#v}_linux_amd64.tar.gz" \
+            | tar xz -C /usr/local/bin caddy >> "$LOG_FILE" 2>&1
+        fi
+      fi
       ;;
     *)
       warn "Unknown OS — attempting binary install of Caddy..."
       _caddy_ver=$(curl -sL https://api.github.com/repos/caddyserver/caddy/releases/latest \
         | grep '"tag_name"' | cut -d'"' -f4)
       curl -sL "https://github.com/caddyserver/caddy/releases/download/${_caddy_ver}/caddy_${_caddy_ver#v}_linux_amd64.tar.gz" \
-        | tar xz -C /usr/local/bin caddy
+        | tar xz -C /usr/local/bin caddy >> "$LOG_FILE" 2>&1
       ;;
   esac
 
@@ -889,22 +1013,26 @@ elif [ "$ZETTABRAIN_TLS_PROVIDER" = "self-signed" ]; then
 
   if [ -f "$CERT_DIR/cert.pem" ] && [ -f "$CERT_DIR/key.pem" ]; then
     success "TLS certificate already present at $CERT_DIR"
-  elif command -v openssl &>/dev/null; then
-    info "Generating self-signed TLS certificate (valid 10 years)..."
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
-      -keyout "$CERT_DIR/key.pem" \
-      -out    "$CERT_DIR/cert.pem" \
-      -days 3650 -nodes \
-      -subj "/CN=local.zettabrain.app" \
-      -addext "subjectAltName=DNS:local.zettabrain.app,DNS:localhost,IP:127.0.0.1" \
-      2>/dev/null
-    chmod 600 "$CERT_DIR/key.pem"
-    chmod 644 "$CERT_DIR/cert.pem"
-    success "Self-signed certificate generated at $CERT_DIR"
-    info    "Browser will show a one-time warning — this is normal for self-signed certs."
   else
-    warn "openssl not found — cannot generate certificate. Server will use HTTP."
-    ZETTABRAIN_TLS_PROVIDER="none"
+    # Ensure openssl is available (may need installing on RHEL minimal installs)
+    command -v openssl &>/dev/null || _install openssl
+    if command -v openssl &>/dev/null; then
+      info "Generating self-signed TLS certificate (valid 10 years)..."
+      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+        -keyout "$CERT_DIR/key.pem" \
+        -out    "$CERT_DIR/cert.pem" \
+        -days 3650 -nodes \
+        -subj "/CN=local.zettabrain.app" \
+        -addext "subjectAltName=DNS:local.zettabrain.app,DNS:localhost,IP:127.0.0.1" \
+        2>/dev/null
+      chmod 600 "$CERT_DIR/key.pem"
+      chmod 644 "$CERT_DIR/cert.pem"
+      success "Self-signed certificate generated at $CERT_DIR"
+      info    "Browser will show a one-time warning — this is normal for self-signed certs."
+    else
+      warn "openssl not found — cannot generate certificate. Server will use HTTP."
+      ZETTABRAIN_TLS_PROVIDER="none"
+    fi
   fi
 
 # ── Option 3: HTTP only ───────────────────────────────────────────
@@ -912,6 +1040,17 @@ else
   warn "Running without TLS. Traffic will be unencrypted."
   warn "This is only suitable for trusted local networks."
 fi
+
+# ── Open firewall port 7860 (firewalld on RHEL, ufw on Ubuntu) ───
+_open_port 7860
+# Caddy also needs 80 + 443 for Let's Encrypt ACME challenge
+if [ "$ZETTABRAIN_TLS_PROVIDER" = "caddy" ]; then
+  _open_port 80
+  _open_port 443
+fi
+
+# ── Final SELinux check (catches any remaining denials) ──────────
+_selinux_permissive_check
 
 # ================================================================
 # STEP 5/5 — BUILD RAG VECTOR STORE

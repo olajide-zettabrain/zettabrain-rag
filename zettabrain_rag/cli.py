@@ -121,6 +121,17 @@ def _require(path: Path):
         sys.exit(1)
 
 
+def _is_admin() -> bool:
+    """Return True if the current process has root/Administrator privileges."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            return False
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
 def _banner():
     print(f"\n╔══════════════════════════════════════════════════════╗")
     print(f"║        ZettaBrain RAG  v{__version__:<29}║")
@@ -157,9 +168,18 @@ Commands:
 def setup_cmd():
     _deploy_scripts()
     _banner()
+
+    if os.name == "nt":
+        print("Windows: interactive setup is not required.")
+        print("Ollama and the embedding model were configured by the installer.")
+        print("\nNext steps:")
+        print("  zettabrain-server    — launch the web GUI")
+        print("  zettabrain-chat      — start CLI chat\n")
+        sys.exit(0)
+
     _require(SETUP_SCRIPT)
 
-    if os.geteuid() != 0:
+    if not _is_admin():
         print("ERROR: Storage setup requires root privileges.")
         print("Run:   sudo zettabrain-setup\n")
         sys.exit(1)
@@ -342,7 +362,11 @@ def cert_cmd():
     _deploy_scripts()
     _banner()
 
-    if os.geteuid() != 0:
+    if os.name == "nt":
+        print("TLS certificate setup is not supported on Windows via this command.")
+        sys.exit(0)
+
+    if not _is_admin():
         print("ERROR: Certificate setup requires root privileges.")
         print("Run:   sudo zettabrain-cert\n")
         sys.exit(1)
@@ -403,7 +427,11 @@ def storage_cmd():
                 print(f"ERROR: storage_add.sh not found at {script}")
                 sys.exit(1)
 
-        if os.geteuid() != 0:
+        if os.name == "nt":
+            print("Storage management via command line is not yet supported on Windows.")
+            sys.exit(1)
+
+        if not _is_admin():
             print("ERROR: Adding storage requires root privileges.")
             print("Run:   sudo zettabrain-storage add\n")
             sys.exit(1)

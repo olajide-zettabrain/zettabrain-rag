@@ -75,3 +75,7 @@ Version is stored in two places and must be kept in sync:
 - `zettabrain_rag/__init__.py`: `__version__ = "X.Y.Z"`
 
 Use `make bump v=X.Y.Z` to update both atomically.
+
+## Web search
+
+Web search and web fetch are enabled. Before recommending a package version, API, CLI flag, or third-party tool, search for the latest release and official docs. Do not rely solely on training data for version numbers, API signatures, or package compatibility — verify against current sources.
