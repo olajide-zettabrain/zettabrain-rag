@@ -196,13 +196,24 @@ class PullRequest(BaseModel):
 # Helpers
 # -------------------------------------------------------
 def _get_python() -> str:
-    candidates = [
-        *list(Path("/root/.local/share/pipx/venvs/zettabrain-rag").rglob("python3")),
-        *list(Path("/opt/zettabrain/venv/bin").glob("python3")),
-        Path(sys.executable),
-    ]
+    if os.name == "nt":
+        local_app = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        home      = Path.home()
+        venv_scripts = [
+            local_app / "pipx" / "venvs" / "zettabrain-rag" / "Scripts",
+            home / ".local" / "pipx" / "venvs" / "zettabrain-rag" / "Scripts",
+        ]
+        candidates = [Path(sys.executable)] + [
+            p for d in venv_scripts for p in d.glob("python*.exe") if p.exists()
+        ]
+    else:
+        candidates = [
+            *list(Path("/root/.local/share/pipx/venvs/zettabrain-rag").rglob("python3")),
+            *list(Path("/opt/zettabrain/venv/bin").glob("python3")),
+            Path(sys.executable),
+        ]
     for c in candidates:
-        if c.exists():
+        if Path(c).exists():
             r = subprocess.run([str(c), "-c", "import langchain_community"],
                                capture_output=True)
             if r.returncode == 0:
@@ -433,19 +444,35 @@ async def pull_model(req: PullRequest):
 @app.post("/api/ingest")
 async def ingest(req: IngestRequest):
     python = _get_python()
+
+    # Prefer a deployed copy; fall back to the script bundled inside the package.
     script = DEPLOY_DIR / "05_ingest_documents.py"
     if not script.exists():
-        raise HTTPException(status_code=404, detail=f"Ingest script not found: {script}")
+        script = PKG_DIR / "scripts" / "05_ingest_documents.py"
+    if not script.exists():
+        raise HTTPException(status_code=404, detail="Ingest script not found.")
+
+    # Ensure working dir exists so ingested_files.json lands in the right place.
+    DEPLOY_DIR.mkdir(parents=True, exist_ok=True)
 
     cmd = [python, str(script)]
     if req.folder:  cmd += ["--folder", req.folder]
     if req.rebuild: cmd += ["--rebuild"]
 
+    # Inject paths as env vars so the script uses the correct platform paths
+    # instead of its own hardcoded Linux defaults.
+    env = os.environ.copy()
+    env["ZETTABRAIN_CHROMA"] = str(CHROMA_PATH)
+    env["ZETTABRAIN_DOCS"]   = req.folder or DOCS_FOLDER
+    env["OLLAMA_HOST"]       = OLLAMA_URL
+
     try:
-        result = subprocess.run(cmd, cwd=str(DEPLOY_DIR),
-                                capture_output=True, text=True, timeout=600)
+        result = subprocess.run(
+            cmd, cwd=str(DEPLOY_DIR),
+            capture_output=True, text=True, timeout=600, env=env,
+        )
         if result.returncode == 0:
-            _reset_vs_cache()  # force reload so new chunks are immediately queryable
+            _reset_vs_cache()
         return {
             "success": result.returncode == 0,
             "output":  result.stdout,

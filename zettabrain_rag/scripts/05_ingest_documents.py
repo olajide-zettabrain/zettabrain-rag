@@ -35,9 +35,17 @@ except ImportError:
 # -------------------------------------------------------
 def _load_zettabrain_env() -> dict:
     cfg = {}
-    for p in ["/opt/zettabrain/src/zettabrain.env", "/zettabrain/src/zettabrain.env"]:
+    candidates = [
+        "/opt/zettabrain/src/zettabrain.env",
+        "/zettabrain/src/zettabrain.env",
+    ]
+    # Windows: %LOCALAPPDATA%\ZettaBrain\zettabrain.env
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        candidates.append(os.path.join(local_app, "ZettaBrain", "zettabrain.env"))
+    for p in candidates:
         if os.path.exists(p):
-            with open(p) as f:
+            with open(p, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
@@ -51,10 +59,27 @@ _cfg = _load_zettabrain_env()
 def _get(key, fallback):
     return os.environ.get(key) or _cfg.get(key) or fallback
 
-DOCS_FOLDER = _get("ZETTABRAIN_DOCS",    _get("RAG_DATA_PATH", "/opt/zettabrain/data"))
-CHROMA_PATH = _get("ZETTABRAIN_CHROMA",  "/opt/zettabrain/src/zettabrain_vectorstore")
+def _default_chroma() -> str:
+    if os.name == "nt":
+        local_app = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+        return os.path.join(local_app, "ZettaBrain", "zettabrain_vectorstore")
+    return "/opt/zettabrain/src/zettabrain_vectorstore"
+
+def _default_docs() -> str:
+    if os.name == "nt":
+        return os.path.join(os.path.expanduser("~"), "Documents")
+    return "/opt/zettabrain/data"
+
+def _default_hash_cache() -> str:
+    if os.name == "nt":
+        local_app = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+        return os.path.join(local_app, "ZettaBrain", "ingested_files.json")
+    return "./ingested_files.json"
+
+DOCS_FOLDER = _get("ZETTABRAIN_DOCS",    _get("RAG_DATA_PATH", _default_docs()))
+CHROMA_PATH = _get("ZETTABRAIN_CHROMA",  _default_chroma())
 EMBED_MODEL = os.environ.get("ZETTABRAIN_EMBED_MODEL", "nomic-embed-text")
-HASH_CACHE  = "./ingested_files.json"
+HASH_CACHE  = _default_hash_cache()
 
 SUPPORTED = {".pdf", ".txt", ".docx", ".md"}
 
@@ -208,7 +233,9 @@ def main():
     parser.add_argument("--stats",  action="store_true", help="Show vector store statistics")
     args = parser.parse_args()
 
-    embeddings  = OllamaEmbeddings(model=EMBED_MODEL)
+    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+    embeddings  = OllamaEmbeddings(model=EMBED_MODEL, base_url=ollama_host)
+    os.makedirs(CHROMA_PATH, exist_ok=True)
     vectorstore = Chroma(
         persist_directory=CHROMA_PATH,
         embedding_function=embeddings,

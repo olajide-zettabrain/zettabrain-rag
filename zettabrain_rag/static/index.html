@@ -339,7 +339,7 @@
             </div>
             <div class="stat-card">
               <div class="stat-val" id="ingest-nfs-docs">—</div>
-              <div class="stat-lbl">NFS Documents</div>
+              <div class="stat-lbl">Documents</div>
             </div>
           </div>
         </div>
@@ -772,7 +772,10 @@ async function runIngest() {
     });
     const data = await r.json();
 
-    if (data.success) {
+    if (!r.ok) {
+      log.textContent += '\n❌ Server error:\n' + (data.detail || r.statusText);
+      toast('Ingestion failed', 'error');
+    } else if (data.success) {
       log.textContent += data.output || 'Done.';
       log.textContent += `\n\n✓ Ingestion complete. Vector store now has ${data.chunks} chunks.`;
       toast('Ingestion complete!', 'success');
