@@ -6,7 +6,10 @@
 # Force TLS 1.2 — required on Windows Server 2016 and older which default to TLS 1.0
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$ErrorActionPreference = "Stop"
+# Use Continue, not Stop — Stop treats any native command stderr as fatal,
+# including harmless progress messages from pip/pipx/ollama.
+# Critical failures are caught explicitly with $LASTEXITCODE or try/catch.
+$ErrorActionPreference = "Continue"
 $EMBED_MODEL = "nomic-embed-text"
 $LOG_FILE = "$env:LOCALAPPDATA\ZettaBrain\install.log"
 
@@ -116,9 +119,7 @@ $PIPX = if (Get-Command pipx -EA SilentlyContinue) { "pipx" }
 OK "pipx $(& $PIPX --version 2>$null)"
 
 Write-Host ""
-# pipx list exits non-zero when nothing installed — catch so Stop mode doesn't abort
-$zbInstalled = $false
-try { $zbInstalled = [bool]((& $PIPX list 2>&1) | Select-String "zettabrain-rag") } catch { }
+$zbInstalled = [bool]((& $PIPX list 2>&1) | Select-String "zettabrain-rag")
 if ($zbInstalled) {
     Info "Upgrading zettabrain-rag (downloading latest + dependencies)..."
     Write-Host "  (This can take 2-5 minutes — please wait)"
