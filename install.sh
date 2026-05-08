@@ -152,6 +152,23 @@ case "$PKG_MANAGER" in
     ;;
 esac
 
+# zstd — installed early, required by Ollama's installer for archive extraction.
+# Shown on screen (not silenced) so failures are immediately visible.
+if ! command -v zstd &>/dev/null; then
+  info "Installing zstd..."
+  case "$PKG_MANAGER" in
+    apt)
+      apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+      apt-get install -y zstd 2>&1 | sed 's/^/  /' ;;
+    dnf)
+      dnf install -y zstd 2>&1 | sed 's/^/  /' ;;
+    yum)
+      yum install -y zstd 2>&1 | sed 's/^/  /' ;;
+  esac
+  command -v zstd &>/dev/null \
+    || die "zstd install failed. Run manually: sudo ${PKG_MANAGER} install zstd — then re-run."
+fi
+
 success "System dependencies installed."
 
 # ── 3/5 NVIDIA drivers ───────────────────────────────────────
@@ -360,28 +377,9 @@ step "5/5" "Installing Ollama + embedding model"
 if command -v ollama &>/dev/null; then
   info "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"
 else
-  # zstd is required by Ollama's installer for archive extraction.
-  # Install it explicitly per distro so the output is visible and errors surface.
-  if ! command -v zstd &>/dev/null; then
-    info "Installing zstd (required by Ollama)..."
-    case "$PKG_MANAGER" in
-      apt)
-        apt-get update -qq 2>&1 | sed 's/^/  /' || true
-        apt-get install -y zstd 2>&1 | sed 's/^/  /' || true
-        ;;
-      dnf)
-        dnf install -y zstd 2>&1 | sed 's/^/  /' || true
-        ;;
-      yum)
-        yum install -y zstd 2>&1 | sed 's/^/  /' || true
-        ;;
-    esac
-    # Abort now rather than let Ollama fail mid-extraction
-    if ! command -v zstd &>/dev/null; then
-      die "zstd could not be installed. Run manually: sudo ${PKG_MANAGER} install zstd — then re-run this installer."
-    fi
-    success "zstd installed."
-  fi
+  # zstd was installed in step 2; guard here in case it was skipped
+  command -v zstd &>/dev/null \
+    || die "zstd not found. Run: sudo ${PKG_MANAGER} install zstd — then re-run."
   info "Installing Ollama (downloading ~60MB)..."
   curl -fsSL https://ollama.com/install.sh | sh 2>&1 | sed 's/^/  /'
   success "Ollama installed."
