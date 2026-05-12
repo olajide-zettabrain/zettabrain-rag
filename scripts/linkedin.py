@@ -32,6 +32,7 @@ import time
 import threading
 import webbrowser
 import urllib.parse
+from urllib.parse import parse_qs
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
