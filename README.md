@@ -239,7 +239,7 @@ sudo systemctl disable --now zettabrain 2>/dev/null || true
 
 | | |
 |---|---|
-| **[@olajide-zettabrain](https://github.com/olajide-zettabrain)** | Creator & maintainer |
+| **[@zettabrain](https://github.com/zettabrain)** | Creator & maintainer |
 
 ---
 
