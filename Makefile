@@ -4,13 +4,10 @@
 #   make publish        — build + upload to PyPI
 #   make bump v=0.1.9   — bump version everywhere
 #   make clean          — remove dist/
-#   make linkedin-auth  — OAuth login (opens browser, saves token)
-#   make linkedin-post  — publish all pre-drafted LinkedIn posts
-#   make linkedin-about — update LinkedIn company About section
 
 VERSION := $(shell grep '^version' pyproject.toml | cut -d'"' -f2)
 
-.PHONY: build publish bump clean sync linkedin-auth linkedin-post linkedin-about
+.PHONY: build publish bump clean sync
 
 # Sync setup.sh from scripts/ to root (single source of truth)
 sync:
@@ -38,17 +35,6 @@ bump:
 	@echo "Bumped $(VERSION) → $(v)"
 	@grep '^version' pyproject.toml
 	@grep '__version__' zettabrain_rag/__init__.py
-
-# ── LinkedIn ──────────────────────────────────────────────────────
-# Set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET in .env first
-linkedin-auth:
-	python3 scripts/linkedin.py auth
-
-linkedin-post:
-	python3 scripts/linkedin.py post
-
-linkedin-about:
-	python3 scripts/linkedin.py about
 
 # Remove dist
 clean:
