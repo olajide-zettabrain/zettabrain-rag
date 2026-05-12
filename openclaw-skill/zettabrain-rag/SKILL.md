@@ -1,14 +1,13 @@
 ---
 name: zettabrain-rag
 description: Chat with your private documents using a fully local RAG pipeline. No cloud, no API keys — runs on your own machine with Ollama + ChromaDB.
-version: 1.0.0
+version: 1.0.1
 emoji: "🧠"
 homepage: https://zettabrain.io
 metadata:
   openclaw:
     requires:
-      bins: [zettabrain-chat, zettabrain-ingest, zettabrain-server, zettabrain-status]
-      anyBins: [pipx, pip3]
+      anyBins: [zettabrain-chat, zettabrain-ingest]
     install:
       - kind: brew
         formula: pipx
@@ -22,34 +21,42 @@ metadata:
         description: Ollama model name to use (e.g. llama3.1:8b, qwen2.5:14b). Defaults to the model selected during setup.
       - name: OLLAMA_HOST
         required: false
-        description: Ollama API URL (default http://localhost:11434). Change if Ollama runs on a remote host.
+        description: "Ollama API URL. Default: http://localhost:11434 (local). WARNING: setting this to a remote host sends document queries off-machine."
 ---
 
 # ZettaBrain RAG Skill
 
-Chat with your own documents using a fully local AI. No data leaves your machine — everything runs on-device with [Ollama](https://ollama.com) (LLM), ChromaDB (vector store), and LangChain.
+Chat with your own documents using a local AI. Document data stays on your machine **when you use local storage and a local Ollama endpoint** (the default). Remote storage (S3, NFS, SMB) and a remote `OLLAMA_HOST` are optional and will move data off-device — see the [Privacy](#privacy) section.
 
 Supports **PDF, DOCX, TXT, Markdown**. Works on Linux, macOS (including EC2 Mac Apple Silicon), and Windows.
 
+- **Source code**: https://github.com/zettabrain/zettabrain-rag (MIT)
+- **Installer scripts**: https://github.com/zettabrain/zettabrain-rag/blob/main/install.sh | [install.ps1](https://github.com/zettabrain/zettabrain-rag/blob/main/install.ps1)
+- **PyPI**: https://pypi.org/project/zettabrain-rag/
+
 ## Install
 
-**One-line installer (Linux / macOS):**
+### Recommended — pipx (no elevated privileges, fully inspectable)
 ```bash
-# Linux
+pipx install zettabrain-rag
+sudo zettabrain-setup
+```
+
+### One-line installer (review source before running)
+The installer scripts are open source and auditable at the links above before execution.
+
+```bash
+# Linux — review first: https://github.com/zettabrain/zettabrain-rag/blob/main/install.sh
 curl -fsSL https://zettabrain.app/install.sh | sudo bash
 
-# macOS
+# macOS — review first: https://github.com/zettabrain/zettabrain-rag/blob/main/install.sh
 curl -fsSL https://zettabrain.app/install.sh | bash
 
-# Windows
+# Windows — review first: https://github.com/zettabrain/zettabrain-rag/blob/main/install.ps1
 irm https://zettabrain.app/install.ps1 | iex
 ```
 
-**Via pipx:**
-```bash
-pipx install zettabrain-rag
-sudo zettabrain-setup      # Linux / macOS EC2
-```
+The Linux installer requires `sudo` to install Ollama system-wide and register a systemd service. The macOS installer does not require `sudo` for the package install step.
 
 ## Setup
 
@@ -60,10 +67,10 @@ sudo zettabrain-setup
 
 This will:
 1. Configure your document storage (local, NFS, SMB, or S3)
-2. Install and start Ollama
+2. Install and start Ollama locally
 3. Pull the recommended AI model for your hardware
-4. Generate a TLS certificate
-5. Register ZettaBrain as a system service (systemd on Linux, launchd on macOS)
+4. Generate a self-signed TLS certificate (stays on-device)
+5. Register ZettaBrain as a background service (see [Service Management](#service-management) to stop or remove it)
 
 ## Commands
 
@@ -72,7 +79,7 @@ This will:
 | `zettabrain-chat` | Interactive CLI chat with your documents |
 | `zettabrain-server` | Start the web GUI server (HTTPS on port 7860) |
 | `zettabrain-ingest` | Index documents into the vector store |
-| `zettabrain-ingest --rebuild` | Re-index all documents from scratch |
+| `zettabrain-ingest --rebuild` | Wipe and re-index all documents |
 | `zettabrain-status` | Show Ollama, vector store, and storage status |
 | `zettabrain-storage add` | Add an additional storage source |
 | `zettabrain-setup` | Re-run the setup wizard |
@@ -85,37 +92,125 @@ zettabrain-chat
 # > What does our Q3 report say about cloud costs?
 ```
 
-**Start the web GUI (available at https://localhost:7860):**
+**Start the web GUI (https://localhost:7860):**
 ```bash
 zettabrain-server
 ```
 
-**Ingest a new folder of documents:**
+**Ingest a specific folder:**
 ```bash
-ZETTABRAIN_DOCS=/path/to/new-docs zettabrain-ingest
+ZETTABRAIN_DOCS=/path/to/docs zettabrain-ingest
 ```
 
-**Check system status:**
+## Vector Store — Location, Retention & Deletion
+
+The vector index (document embeddings) is stored **only on your local machine**:
+
+| Item | Location |
+|---|---|
+| Vector database | `/opt/zettabrain/src/zettabrain_vectorstore/` |
+| Ingestion log (MD5 hashes) | `/opt/zettabrain/src/ingested_files.json` |
+| Configuration | `/opt/zettabrain/src/zettabrain.env` |
+
+Embeddings are **never transmitted** to any remote service. They are derived from your documents and stored locally in ChromaDB.
+
+**Delete the vector index:**
 ```bash
-zettabrain-status
+# Via CLI
+zettabrain-server &
+curl -X DELETE http://localhost:7860/api/vectorstore
+
+# Or directly
+rm -rf /opt/zettabrain/src/zettabrain_vectorstore
+rm -f  /opt/zettabrain/src/ingested_files.json
 ```
 
-**Switch LLM model:**
+**Rebuild from scratch:**
 ```bash
-ollama pull qwen2.5:14b
-ZETTABRAIN_LLM_MODEL=qwen2.5:14b zettabrain-chat
+zettabrain-ingest --rebuild
 ```
+
+**Exclude files or folders** by not including them in `ZETTABRAIN_DOCS` — only files under that path are indexed.
+
+## Service Management
+
+ZettaBrain registers a background service so the web GUI auto-starts on boot. Here is how to control or fully remove it:
+
+### Linux (systemd)
+```bash
+# Stop the service
+sudo systemctl stop zettabrain
+
+# Disable auto-start on boot
+sudo systemctl disable zettabrain
+
+# Check status
+sudo systemctl status zettabrain
+
+# View logs
+journalctl -u zettabrain -f
+
+# Remove service completely
+sudo systemctl stop zettabrain
+sudo systemctl disable zettabrain
+sudo rm /etc/systemd/system/zettabrain.service
+sudo systemctl daemon-reload
+```
+
+### macOS (launchd)
+```bash
+# Stop the service
+sudo launchctl unload /Library/LaunchDaemons/io.zettabrain.server.plist
+
+# Remove auto-start on boot
+sudo rm /Library/LaunchDaemons/io.zettabrain.server.plist
+
+# View logs
+tail -f /opt/zettabrain/logs/server.log
+```
+
+### Uninstall completely
+```bash
+# Remove the package
+pipx uninstall zettabrain-rag
+
+# Stop and remove service (Linux)
+sudo systemctl stop zettabrain && sudo systemctl disable zettabrain
+sudo rm -f /etc/systemd/system/zettabrain.service && sudo systemctl daemon-reload
+
+# Stop and remove service (macOS)
+sudo launchctl unload /Library/LaunchDaemons/io.zettabrain.server.plist
+sudo rm -f /Library/LaunchDaemons/io.zettabrain.server.plist
+
+# Remove all data, config, and vector index
+sudo rm -rf /opt/zettabrain
+```
+
+## Privacy
+
+Privacy depends on your configuration:
+
+| Configuration | Data stays local? |
+|---|---|
+| Local storage + `OLLAMA_HOST=http://localhost:11434` (default) | ✅ Yes — fully on-device |
+| NFS or SMB network storage | ⚠️ Documents fetched over your LAN |
+| S3 / object storage | ⚠️ Documents streamed from cloud storage |
+| Remote `OLLAMA_HOST` | ⚠️ Queries and retrieved document chunks sent to remote Ollama |
+
+**Default setup is fully local.** The setup wizard defaults to local storage and a localhost Ollama endpoint. Remote options are opt-in and clearly labelled during setup.
+
+Document embeddings (vector index) are always stored locally regardless of storage configuration.
 
 ## Configuration
 
-Settings are stored in `/opt/zettabrain/src/zettabrain.env`. Key variables:
+Settings file: `/opt/zettabrain/src/zettabrain.env`
 
 | Variable | Default | Description |
 |---|---|---|
 | `ZETTABRAIN_DOCS` | set during setup | Path to documents folder |
 | `ZETTABRAIN_LLM_MODEL` | set during setup | Ollama model name |
 | `ZETTABRAIN_EMBED_MODEL` | `nomic-embed-text` | Embedding model |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama API endpoint |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama API endpoint (keep local for full privacy) |
 | `ZETTABRAIN_CHUNK_SIZE` | `1000` | Document chunk size |
 | `ZETTABRAIN_CHUNK_OVERLAP` | `200` | Chunk overlap |
 
@@ -132,7 +227,7 @@ Settings are stored in `/opt/zettabrain/src/zettabrain.env`. Key variables:
 
 ## Links
 
+- **GitHub** (source + installer scripts): https://github.com/zettabrain/zettabrain-rag
 - **PyPI**: https://pypi.org/project/zettabrain-rag/
-- **GitHub**: https://github.com/zettabrain/zettabrain-rag
 - **Website**: https://zettabrain.io
 - **Issues**: https://github.com/zettabrain/zettabrain-rag/issues
