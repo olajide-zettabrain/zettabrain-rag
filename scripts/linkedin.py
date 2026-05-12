@@ -3,10 +3,10 @@
 ZettaBrain LinkedIn Manager
 ────────────────────────────
 Commands:
-  python3 scripts/linkedin.py auth          # OAuth flow — saves token
-  python3 scripts/linkedin.py about         # Update company About section
-  python3 scripts/linkedin.py post          # Publish all pre-drafted posts
+  python3 scripts/linkedin.py auth          # OAuth flow — saves token + member URN
+  python3 scripts/linkedin.py post          # Publish all pre-drafted posts (as member)
   python3 scripts/linkedin.py post --msg "Text"  # Publish a single custom post
+  python3 scripts/linkedin.py about         # Update company About section (requires Marketing Developer Platform)
 
 Required env vars (set in .env or export):
   LINKEDIN_CLIENT_ID
@@ -17,11 +17,15 @@ Optional:
 
 Setup:
   1. Go to https://www.linkedin.com/developers/apps and create an app.
-  2. Add products: "Share on LinkedIn" and "Marketing Developer Platform".
+  2. Add product: "Share on LinkedIn" (grants w_member_social).
   3. Under Auth, set redirect URL to: http://localhost:8080/callback
-  4. Copy Client ID and Secret → export as env vars (or add to .env).
+  4. Copy Client ID and Secret → add to .env.
   5. Run: python3 scripts/linkedin.py auth
   6. Run: python3 scripts/linkedin.py post
+
+Note: Posting as the org page (urn:li:organization) requires the "Marketing Developer Platform"
+product (gated / requires LinkedIn approval). Without it, posts are published as the
+authenticated member. Apply at: https://www.linkedin.com/developers/apps → Products tab.
 """
 
 import argparse
@@ -45,7 +49,9 @@ AUTH_URL        = "https://www.linkedin.com/oauth/v2/authorization"
 TOKEN_URL       = "https://www.linkedin.com/oauth/v2/accessToken"
 API_BASE        = "https://api.linkedin.com/v2"
 REDIRECT_URI    = "http://localhost:8080/callback"
-SCOPES          = "w_organization_social rw_organization_admin r_organization_social"
+# w_member_social — available via "Share on LinkedIn" product (no approval needed)
+# w_organization_social / rw_organization_admin — require "Marketing Developer Platform" (gated)
+SCOPES          = "w_member_social r_liteprofile"
 DEFAULT_TOKEN_FILE = Path.home() / ".zettabrain" / "linkedin_token.json"
 
 # ── Pre-drafted posts ────────────────────────────────────────────
@@ -131,20 +137,27 @@ def _token_file():
     return path
 
 
-def _load_token():
+def _load_token_data():
     f = _token_file()
     if f.exists():
         data = json.loads(f.read_text())
         if data.get("expires_at", 0) > time.time():
-            return data["access_token"]
+            return data
     return None
 
 
-def _save_token(token_data):
+def _load_token():
+    data = _load_token_data()
+    return data["access_token"] if data else None
+
+
+def _save_token(token_data, member_urn=None):
     data = {
         "access_token": token_data["access_token"],
         "expires_at": time.time() + token_data.get("expires_in", 5184000),
     }
+    if member_urn:
+        data["member_urn"] = member_urn
     _token_file().write_text(json.dumps(data, indent=2))
     _token_file().chmod(0o600)
     print(f"  Token saved → {_token_file()}")
@@ -169,11 +182,17 @@ def _headers(token):
     }
 
 
+def _get_member_urn(token):
+    resp = requests.get(f"{API_BASE}/me", headers=_headers(token))
+    resp.raise_for_status()
+    member_id = resp.json().get("id")
+    return f"urn:li:person:{member_id}"
+
+
 # ── OAuth flow ───────────────────────────────────────────────────
 def cmd_auth(_args):
     client_id, client_secret = _require_creds()
 
-    # Local callback server to capture the auth code
     code_holder = {}
 
     class Handler(BaseHTTPRequestHandler):
@@ -212,7 +231,6 @@ def cmd_auth(_args):
         print("ERROR: No code received within 120 seconds.")
         sys.exit(1)
 
-    # Exchange code for token
     resp = requests.post(TOKEN_URL, data={
         "grant_type": "authorization_code",
         "code": code_holder["code"],
@@ -221,7 +239,12 @@ def cmd_auth(_args):
         "client_secret": client_secret,
     })
     resp.raise_for_status()
-    _save_token(resp.json())
+    token_data = resp.json()
+
+    # Fetch member URN and store alongside token
+    member_urn = _get_member_urn(token_data["access_token"])
+    _save_token(token_data, member_urn=member_urn)
+    print(f"  Authenticated as: {member_urn}")
     print("  Authentication successful.")
 
 
@@ -234,12 +257,6 @@ def cmd_about(args):
 
     text = getattr(args, "msg", None) or ABOUT_TEXT
 
-    # LinkedIn requires Marketing Developer Platform for org profile updates
-    resp = requests.post(
-        f"{API_BASE}/organizationalEntityAcls?q=roleAssignee",
-        headers=_headers(token),
-    )
-
     resp = requests.patch(
         f"https://api.linkedin.com/rest/organizations/{ORG_ID}",
         headers={**_headers(token), "LinkedIn-Version": "202308"},
@@ -249,13 +266,15 @@ def cmd_about(args):
         print("  About section updated.")
     else:
         print(f"  ERROR {resp.status_code}: {resp.text}")
-        print("  Note: updating the About section requires the Marketing Developer Platform product on your LinkedIn app.")
+        if resp.status_code in (403, 401):
+            print("  Note: updating the About section requires the 'Marketing Developer Platform'")
+            print("  product on your LinkedIn app (gated — apply via the Products tab).")
 
 
 # ── Create a single post ─────────────────────────────────────────
-def _create_post(token, text):
+def _create_post(token, text, author_urn):
     payload = {
-        "author": ORG_URN,
+        "author": author_urn,
         "lifecycleState": "PUBLISHED",
         "specificContent": {
             "com.linkedin.ugc.ShareContent": {
@@ -274,31 +293,44 @@ def _create_post(token, text):
 
 
 def cmd_post(args):
-    token = _load_token()
-    if not token:
+    token_data = _load_token_data()
+    if not token_data:
         print("ERROR: No valid token. Run: python3 scripts/linkedin.py auth")
         sys.exit(1)
 
-    # Single custom post
+    token = token_data["access_token"]
+
+    # Determine author: org URN if token has org scope, else member URN
+    member_urn = token_data.get("member_urn")
+    if not member_urn:
+        member_urn = _get_member_urn(token)
+
+    # Try org URN first; fall back to member URN if forbidden
+    def _post_with_fallback(text):
+        for author_urn, label in [(ORG_URN, "org"), (member_urn, "member")]:
+            try:
+                post_id = _create_post(token, text, author_urn)
+                print(f"✓  id={post_id}  (as {label})")
+                return
+            except requests.HTTPError as e:
+                if e.response.status_code == 403 and author_urn == ORG_URN:
+                    # Org posting requires Marketing Developer Platform — fall back
+                    continue
+                print(f"✗  {e.response.status_code}: {e.response.text}")
+                return
+
     if getattr(args, "msg", None):
-        post_id = _create_post(token, args.msg)
-        print(f"  Posted: {post_id}")
+        _post_with_fallback(args.msg)
         return
 
-    # All pre-drafted posts
     for p in POSTS:
         print(f"  Publishing [{p['id']}]…", end=" ", flush=True)
-        try:
-            post_id = _create_post(token, p["text"])
-            print(f"✓  id={post_id}")
-        except requests.HTTPError as e:
-            print(f"✗  {e.response.status_code}: {e.response.text}")
-        time.sleep(2)  # avoid rate limiting
+        _post_with_fallback(p["text"])
+        time.sleep(2)
 
 
 # ── CLI entry point ──────────────────────────────────────────────
 def main():
-    # Load .env if present
     env_file = Path(__file__).parent.parent / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
@@ -312,10 +344,10 @@ def main():
 
     sub.add_parser("auth", help="OAuth 2.0 login — opens browser, saves token")
 
-    p_about = sub.add_parser("about", help="Update company About section")
+    p_about = sub.add_parser("about", help="Update company About section (requires Marketing Developer Platform)")
     p_about.add_argument("--msg", help="Custom about text (default: pre-drafted)")
 
-    p_post = sub.add_parser("post", help="Publish posts to the company page")
+    p_post = sub.add_parser("post", help="Publish posts (tries org page, falls back to member)")
     p_post.add_argument("--msg", help="Custom post text (default: publishes all pre-drafted posts)")
 
     args = parser.parse_args()
