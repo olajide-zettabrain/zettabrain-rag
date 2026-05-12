@@ -219,7 +219,7 @@ while true; do
   esac
 done
 
-success "Primary storage: ${STORAGE_TYPE^^}"
+success "Primary storage: $(echo "$STORAGE_TYPE" | tr '[:lower:]' '[:upper:]')"
 
 # Variables set by each storage block
 PRIMARY_PATH=""      # the resolved local path to documents
@@ -1242,8 +1242,11 @@ PYTHON_BIN=""
 # Method 1 — pipx venv (most reliable for pipx installs)
 for _venv in \
     /root/.local/share/pipx/venvs/zettabrain-rag \
+    /root/.local/pipx/venvs/zettabrain-rag \
     /home/*/.local/share/pipx/venvs/zettabrain-rag \
+    /home/*/.local/pipx/venvs/zettabrain-rag \
     /Users/*/.local/share/pipx/venvs/zettabrain-rag \
+    /Users/*/.local/pipx/venvs/zettabrain-rag \
     /opt/zettabrain/venv; do
   for _py in \
       "${_venv}/bin/python3" \
@@ -1278,9 +1281,9 @@ DOC_COUNT=0
 if [ -z "$PYTHON_BIN" ]; then
   warn "No Python with langchain found. Build the vector store manually:"
   if _IS_MAC; then
-    warn "  find ~/.local/share/pipx/venvs/zettabrain-rag -name 'python*' -type f | head -3"
+    warn "  find ~/.local/pipx/venvs/zettabrain-rag ~/.local/share/pipx/venvs/zettabrain-rag -name 'python*' -type f 2>/dev/null | head -3"
   else
-    warn "  find /root/.local/share/pipx/venvs/zettabrain-rag -name 'python*' -type f | head -3"
+    warn "  find /root/.local/share/pipx/venvs/zettabrain-rag /root/.local/pipx/venvs/zettabrain-rag -name 'python*' -type f 2>/dev/null | head -3"
   fi
   warn "  zettabrain-ingest"
 
@@ -1421,7 +1424,7 @@ echo -e "${GREEN}${BOLD}╔═════════════════�
 echo -e "${GREEN}${BOLD}║        ZettaBrain Setup Complete!                    ║${NC}"
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  Storage type : ${GREEN}${STORAGE_TYPE^^}${NC}"
+echo -e "  Storage type : ${GREEN}$(echo "$STORAGE_TYPE" | tr '[:lower:]' '[:upper:]')${NC}"
 echo -e "  Docs path    : ${GREEN}${PRIMARY_PATH}${NC}"
 echo -e "  Documents    : ${GREEN}${DOC_COUNT} file(s)${NC}"
 echo -e "  Config file  : ${GREEN}${CONFIG_FILE}${NC}"
