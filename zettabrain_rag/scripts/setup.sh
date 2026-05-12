@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# ZettaBrain — Initial Setup  v0.2.1
+# ZettaBrain — Initial Setup  v0.2.2
 # ============================================================
 # SOURCE OF TRUTH: zettabrain_rag/scripts/setup.sh
 # DO NOT EDIT root setup.sh — auto-copied during make build.
@@ -9,8 +9,10 @@
 #   1. Select PRIMARY storage type (Local / NFS / SMB)
 #   2. Configure and mount that storage
 #   3. Install Ollama + pull required AI models
-#   4. Install Cloudflare Tunnel for trusted HTTPS (optional, token required)
+#   4. Install Caddy / self-signed cert for HTTPS (optional)
 #   5. Build the initial RAG vector store
+#
+# Supported platforms: Linux (Ubuntu/RHEL/Amazon), macOS 12+ (Intel & Apple Silicon)
 #
 # To add MORE storage sources after install:
 #   sudo zettabrain-storage add
@@ -20,6 +22,31 @@
 # so partial failures don't kill the whole setup
 
 # -------------------------------------------------------
+# PLATFORM DETECTION — must come first
+# -------------------------------------------------------
+_OS_TYPE="linux"
+[ "$(uname -s)" = "Darwin" ] && _OS_TYPE="macos"
+_IS_MAC() { [ "$_OS_TYPE" = "macos" ]; }
+
+# On macOS, brew must NOT run as root — run as the invoking user
+_BREW_USER="${SUDO_USER:-}"
+[ -z "$_BREW_USER" ] && _BREW_USER="$(logname 2>/dev/null || true)"
+[ "$_BREW_USER" = "root" ] && _BREW_USER=""
+
+_brew() {
+  if [ -n "$_BREW_USER" ]; then
+    sudo -u "$_BREW_USER" brew "$@"
+  else
+    brew "$@"
+  fi
+}
+
+# Add Homebrew binary paths to root's PATH on macOS so command -v works correctly
+if _IS_MAC; then
+  export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
+fi
+
+# -------------------------------------------------------
 # CONSTANTS — never change these
 # -------------------------------------------------------
 DEPLOY_DIR="/opt/zettabrain/src"
@@ -27,13 +54,20 @@ CERT_DIR="/opt/zettabrain/certs"
 CONFIG_FILE="${DEPLOY_DIR}/zettabrain.env"
 STORAGE_CONFIG="${DEPLOY_DIR}/storage.conf"  # tracks all storage sources
 RAG_SCRIPT="${DEPLOY_DIR}/03_langchain_rag.py"
-LOG_FILE="/var/log/zettabrain-setup.log"
 FSTAB_FILE="/etc/fstab"
 OLLAMA_URL="http://localhost:11434"
 EMBED_MODEL="nomic-embed-text"
 
-# NFS/SMB mount options
+if _IS_MAC; then
+  LOG_FILE="/opt/zettabrain/logs/setup.log"
+else
+  LOG_FILE="/var/log/zettabrain-setup.log"
+fi
+
+# NFS/SMB mount options (Linux)
 NFS_OPTS="defaults,_netdev,nfsvers=4,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2"
+# macOS NFS omits _netdev (unsupported)
+NFS_OPTS_MAC="nfsvers=4,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2"
 SMB_OPTS="uid=0,gid=0,file_mode=0755,dir_mode=0755,noperm,_netdev"
 
 # -------------------------------------------------------
@@ -64,6 +98,19 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 mkdir -p "$DEPLOY_DIR" "$CERT_DIR"
+_IS_MAC && mkdir -p /opt/zettabrain/logs
+
+# -------------------------------------------------------
+# HOMEBREW CHECK (macOS only)
+# -------------------------------------------------------
+if _IS_MAC; then
+  if ! _brew --version &>/dev/null 2>&1; then
+    error "Homebrew is not installed. Install it as your regular user first:"
+    error "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+    exit 1
+  fi
+  info "Homebrew found: $(_brew --version 2>/dev/null | head -1)"
+fi
 
 # -------------------------------------------------------
 # BANNER
@@ -83,19 +130,40 @@ echo ""
 # PACKAGE MANAGER DETECTION (used throughout setup)
 # -------------------------------------------------------
 _PM=""
-command -v apt-get &>/dev/null && _PM="apt"
-command -v dnf     &>/dev/null && _PM="dnf"
-command -v yum     &>/dev/null && _PM="${_PM:-yum}"
+if _IS_MAC; then
+  _PM="brew"
+else
+  command -v apt-get &>/dev/null && _PM="apt"
+  command -v dnf     &>/dev/null && _PM="dnf"
+  command -v yum     &>/dev/null && _PM="${_PM:-yum}"
+fi
 
-# Detect OS ID for distro-specific paths
+# Detect OS ID for distro-specific paths (Linux only)
 _OS_ID=""; _OS_VER=""
 [ -f /etc/os-release ] && { . /etc/os-release; _OS_ID="${ID:-}"; _OS_VER="${VERSION_ID:-}"; }
 
-# ── Install helper (uses top-level _PM) ─────────────────
-_install() { [ -n "$_PM" ] && "$_PM" install -y "$@" >> "$LOG_FILE" 2>&1 || true; }
+# ── Install helper ───────────────────────────────────────
+_install() {
+  if _IS_MAC; then
+    _brew install "$@" >> "$LOG_FILE" 2>&1 || true
+  elif [ -n "$_PM" ]; then
+    "$_PM" install -y "$@" >> "$LOG_FILE" 2>&1 || true
+  fi
+}
+
+# ── Mount check helper (replaces mountpoint -q, works on macOS + Linux) ──
+_is_mounted() { mount | grep -qE " on ${1} | on ${1}\("; }
+
+# ── sed -i portability (macOS requires empty string argument) ────
+_sed_i() {
+  if _IS_MAC; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
 
 # ── SELinux helper ───────────────────────────────────────
-# Called before storage mounts and before server launch.
 _selinux_permissive_check() {
   command -v getenforce &>/dev/null || return 0
   local _mode; _mode=$(getenforce 2>/dev/null)
@@ -105,7 +173,6 @@ _selinux_permissive_check() {
     setsebool -P use_samba_home_dirs    1 >> "$LOG_FILE" 2>&1 || true
     setsebool -P use_fusefs_home_dirs   1 >> "$LOG_FILE" 2>&1 || true
     setsebool -P httpd_can_network_connect 1 >> "$LOG_FILE" 2>&1 || true
-    # Allow the ZettaBrain server to bind and accept connections on port 7860
     if command -v semanage &>/dev/null; then
       semanage port -a -t http_port_t -p tcp 7860 >> "$LOG_FILE" 2>&1 || true
     fi
@@ -114,9 +181,10 @@ _selinux_permissive_check() {
 }
 
 # ── Firewall helper ──────────────────────────────────────
-# Opens a TCP port in firewalld (RHEL/Fedora) or ufw (Ubuntu).
+# macOS: skipped — configure via System Settings > Network > Firewall if needed.
 _open_port() {
   local _port="$1"
+  _IS_MAC && return 0
   if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --add-port="${_port}/tcp" --permanent >> "$LOG_FILE" 2>&1 || true
     firewall-cmd --reload >> "$LOG_FILE" 2>&1 || true
@@ -216,21 +284,24 @@ if [ "$STORAGE_TYPE" = "nfs" ]; then
   step "NFS Share Configuration"
   echo ""
 
-  # Install NFS client
-  info "Installing NFS client packages..."
-  case "$_PM" in
-    apt)
-      apt-get update -qq >> "$LOG_FILE" 2>&1 || true
-      _install nfs-common netcat-openbsd
-      ;;
-    dnf|yum)
-      _install nfs-utils nmap-ncat
-      ;;
-    *)
-      warn "Cannot detect package manager — assuming NFS client is installed."
-      ;;
-  esac
-  _selinux_permissive_check
+  if _IS_MAC; then
+    info "NFS client is built-in on macOS — skipping package install."
+  else
+    info "Installing NFS client packages..."
+    case "$_PM" in
+      apt)
+        apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+        _install nfs-common netcat-openbsd
+        ;;
+      dnf|yum)
+        _install nfs-utils nmap-ncat
+        ;;
+      *)
+        warn "Cannot detect package manager — assuming NFS client is installed."
+        ;;
+    esac
+    _selinux_permissive_check
+  fi
   success "NFS client ready."
   echo ""
 
@@ -281,13 +352,19 @@ if [ "$STORAGE_TYPE" = "nfs" ]; then
   mkdir -p "$NFS_MOUNT_POINT"
 
   # Unmount cleanly if already mounted
-  if mountpoint -q "$NFS_MOUNT_POINT" 2>/dev/null; then
+  if _is_mounted "$NFS_MOUNT_POINT"; then
     warn "Already mounted at ${NFS_MOUNT_POINT} — unmounting first..."
     umount "$NFS_MOUNT_POINT" 2>/dev/null || true
   fi
 
   info "Mounting ${NFS_SERVER_IP}:${NFS_EXPORT_PATH} → ${NFS_MOUNT_POINT}..."
-  if mount -t nfs -o "$NFS_OPTS" "${NFS_SERVER_IP}:${NFS_EXPORT_PATH}" "$NFS_MOUNT_POINT"; then
+  if _IS_MAC; then
+    mount -t nfs -o "$NFS_OPTS_MAC" "${NFS_SERVER_IP}:${NFS_EXPORT_PATH}" "$NFS_MOUNT_POINT"
+  else
+    mount -t nfs -o "$NFS_OPTS" "${NFS_SERVER_IP}:${NFS_EXPORT_PATH}" "$NFS_MOUNT_POINT"
+  fi
+
+  if [ $? -eq 0 ]; then
     _count=$(find "$NFS_MOUNT_POINT" -maxdepth 2 -type f 2>/dev/null | wc -l)
     success "Mounted. Files visible: ${_count}"
     PRIMARY_PATH="$NFS_MOUNT_POINT"
@@ -299,15 +376,20 @@ if [ "$STORAGE_TYPE" = "nfs" ]; then
   fi
 
   # Persist in /etc/fstab
-  _fstab_line="${NFS_SERVER_IP}:${NFS_EXPORT_PATH}  ${NFS_MOUNT_POINT}  nfs  ${NFS_OPTS}  0  0"
+  if _IS_MAC; then
+    _fstab_line="${NFS_SERVER_IP}:${NFS_EXPORT_PATH}  ${NFS_MOUNT_POINT}  nfs  ${NFS_OPTS_MAC}  0  0"
+  else
+    _fstab_line="${NFS_SERVER_IP}:${NFS_EXPORT_PATH}  ${NFS_MOUNT_POINT}  nfs  ${NFS_OPTS}  0  0"
+  fi
+
   if grep -qF "${NFS_SERVER_IP}:${NFS_EXPORT_PATH}" "$FSTAB_FILE" 2>/dev/null; then
     warn "fstab entry already exists — skipping."
   else
-    cp "$FSTAB_FILE" "${FSTAB_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    _IS_MAC || cp "$FSTAB_FILE" "${FSTAB_FILE}.bak.$(date +%Y%m%d%H%M%S)"
     { echo ""; echo "# ZettaBrain NFS — $(date '+%Y-%m-%d %H:%M:%S')"; echo "$_fstab_line"; } >> "$FSTAB_FILE"
     success "Added to /etc/fstab — mount persists after reboot."
   fi
-  systemctl daemon-reload 2>/dev/null || true
+  _IS_MAC || systemctl daemon-reload 2>/dev/null || true
 
   STORAGE_LABEL="nfs:${NFS_SERVER_IP}:${NFS_EXPORT_PATH}"
 
@@ -321,22 +403,26 @@ if [ "$STORAGE_TYPE" = "smb" ]; then
   step "SMB / CIFS Share Configuration"
   echo ""
 
-  # Install cifs-utils
-  info "Installing SMB client (cifs-utils)..."
-  case "$_PM" in
-    apt)
-      apt-get update -qq >> "$LOG_FILE" 2>&1 || true
-      _install cifs-utils netcat-openbsd
-      ;;
-    dnf|yum)
-      _install cifs-utils nmap-ncat
-      ;;
-    *)
-      warn "Cannot detect package manager — assuming cifs-utils is installed."
-      ;;
-  esac
-  _selinux_permissive_check
-  success "SMB client ready."
+  if _IS_MAC; then
+    info "SMB client is built-in on macOS — skipping package install."
+    success "SMB client ready."
+  else
+    info "Installing SMB client (cifs-utils)..."
+    case "$_PM" in
+      apt)
+        apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+        _install cifs-utils netcat-openbsd
+        ;;
+      dnf|yum)
+        _install cifs-utils nmap-ncat
+        ;;
+      *)
+        warn "Cannot detect package manager — assuming cifs-utils is installed."
+        ;;
+    esac
+    _selinux_permissive_check
+    success "SMB client ready."
+  fi
   echo ""
 
   # Server IP
@@ -394,55 +480,75 @@ if [ "$STORAGE_TYPE" = "smb" ]; then
     warn "netcat not found — skipping port check."
   fi
 
-  # Write credentials file (never put passwords in fstab or mount options)
-  SMB_CREDS_FILE="/etc/zettabrain/smb-${SMB_SERVER_IP}.credentials"
-  mkdir -p /etc/zettabrain
-  {
-    echo "username=${SMB_USER:-guest}"
-    [ -n "$SMB_PASS" ]   && echo "password=${SMB_PASS}"
-    [ -n "$SMB_DOMAIN" ] && echo "domain=${SMB_DOMAIN}"
-  } > "$SMB_CREDS_FILE"
-  chmod 600 "$SMB_CREDS_FILE"
-  chown root:root "$SMB_CREDS_FILE"
-  success "Credentials saved securely: ${SMB_CREDS_FILE}"
-
-  # Build mount options — reference credentials file, never inline
-  _smb_mount_opts="${SMB_OPTS},credentials=${SMB_CREDS_FILE}"
-
   # Create mount point
   mkdir -p "$SMB_MOUNT_POINT"
 
   # Unmount if already mounted
-  if mountpoint -q "$SMB_MOUNT_POINT" 2>/dev/null; then
+  if _is_mounted "$SMB_MOUNT_POINT"; then
     warn "Already mounted at ${SMB_MOUNT_POINT} — unmounting first..."
     umount "$SMB_MOUNT_POINT" 2>/dev/null || true
   fi
 
-  # Mount
-  info "Mounting //${SMB_SERVER_IP}/${SMB_SHARE} → ${SMB_MOUNT_POINT}..."
-  if mount -t cifs "//${SMB_SERVER_IP}/${SMB_SHARE}" "$SMB_MOUNT_POINT" \
-     -o "$_smb_mount_opts" 2>/dev/null; then
-    _count=$(find "$SMB_MOUNT_POINT" -maxdepth 2 -type f 2>/dev/null | wc -l)
-    success "Mounted. Files visible: ${_count}"
-    PRIMARY_PATH="$SMB_MOUNT_POINT"
+  if _IS_MAC; then
+    # macOS uses mount_smbfs with credentials embedded in URL
+    _smb_url="//${SMB_USER:-guest}:${SMB_PASS}@${SMB_SERVER_IP}/${SMB_SHARE}"
+    info "Mounting //${SMB_SERVER_IP}/${SMB_SHARE} → ${SMB_MOUNT_POINT}..."
+    if mount_smbfs "$_smb_url" "$SMB_MOUNT_POINT" 2>/dev/null; then
+      _count=$(find "$SMB_MOUNT_POINT" -maxdepth 2 -type f 2>/dev/null | wc -l)
+      success "Mounted. Files visible: ${_count}"
+      PRIMARY_PATH="$SMB_MOUNT_POINT"
+    else
+      error "SMB mount failed. Common causes:"
+      error "  - Wrong share name (list shares: smbutil view //${SMB_SERVER_IP})"
+      error "  - Wrong credentials"
+      exit 1
+    fi
+    # fstab without inline password — macOS will prompt on reboot (add to Keychain to avoid)
+    _fstab_line="//${SMB_USER:-guest}@${SMB_SERVER_IP}/${SMB_SHARE}  ${SMB_MOUNT_POINT}  smbfs  rw  0  0"
+    if grep -qF "${SMB_SERVER_IP}/${SMB_SHARE}" "$FSTAB_FILE" 2>/dev/null; then
+      warn "fstab entry already exists — skipping."
+    else
+      { echo ""; echo "# ZettaBrain SMB — $(date '+%Y-%m-%d %H:%M:%S')"; echo "$_fstab_line"; } >> "$FSTAB_FILE"
+      success "Added to /etc/fstab (add credentials to Keychain to avoid password prompts on reboot)."
+    fi
   else
-    error "SMB mount failed. Common causes:"
-    error "  - Wrong share name (list shares: smbclient -L //${SMB_SERVER_IP} -N)"
-    error "  - Wrong credentials"
-    error "  - SMB version mismatch — try adding vers=2.0 to SMB_OPTS"
-    exit 1
-  fi
+    # Linux: write credentials file (never put passwords in fstab or mount options)
+    SMB_CREDS_FILE="/etc/zettabrain/smb-${SMB_SERVER_IP}.credentials"
+    mkdir -p /etc/zettabrain
+    {
+      echo "username=${SMB_USER:-guest}"
+      [ -n "$SMB_PASS" ]   && echo "password=${SMB_PASS}"
+      [ -n "$SMB_DOMAIN" ] && echo "domain=${SMB_DOMAIN}"
+    } > "$SMB_CREDS_FILE"
+    chmod 600 "$SMB_CREDS_FILE"
+    chown root:root "$SMB_CREDS_FILE"
+    success "Credentials saved securely: ${SMB_CREDS_FILE}"
 
-  # Persist in /etc/fstab — use credentials file reference, not inline password
-  _fstab_line="//${SMB_SERVER_IP}/${SMB_SHARE}  ${SMB_MOUNT_POINT}  cifs  ${_smb_mount_opts}  0  0"
-  if grep -qF "//${SMB_SERVER_IP}/${SMB_SHARE}" "$FSTAB_FILE" 2>/dev/null; then
-    warn "fstab entry already exists — skipping."
-  else
-    cp "$FSTAB_FILE" "${FSTAB_FILE}.bak.$(date +%Y%m%d%H%M%S)"
-    { echo ""; echo "# ZettaBrain SMB — $(date '+%Y-%m-%d %H:%M:%S')"; echo "$_fstab_line"; } >> "$FSTAB_FILE"
-    success "Added to /etc/fstab — mount persists after reboot."
+    _smb_mount_opts="${SMB_OPTS},credentials=${SMB_CREDS_FILE}"
+    info "Mounting //${SMB_SERVER_IP}/${SMB_SHARE} → ${SMB_MOUNT_POINT}..."
+    if mount -t cifs "//${SMB_SERVER_IP}/${SMB_SHARE}" "$SMB_MOUNT_POINT" \
+       -o "$_smb_mount_opts" 2>/dev/null; then
+      _count=$(find "$SMB_MOUNT_POINT" -maxdepth 2 -type f 2>/dev/null | wc -l)
+      success "Mounted. Files visible: ${_count}"
+      PRIMARY_PATH="$SMB_MOUNT_POINT"
+    else
+      error "SMB mount failed. Common causes:"
+      error "  - Wrong share name (list shares: smbclient -L //${SMB_SERVER_IP} -N)"
+      error "  - Wrong credentials"
+      error "  - SMB version mismatch — try adding vers=2.0 to SMB_OPTS"
+      exit 1
+    fi
+
+    _fstab_line="//${SMB_SERVER_IP}/${SMB_SHARE}  ${SMB_MOUNT_POINT}  cifs  ${_smb_mount_opts}  0  0"
+    if grep -qF "//${SMB_SERVER_IP}/${SMB_SHARE}" "$FSTAB_FILE" 2>/dev/null; then
+      warn "fstab entry already exists — skipping."
+    else
+      cp "$FSTAB_FILE" "${FSTAB_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+      { echo ""; echo "# ZettaBrain SMB — $(date '+%Y-%m-%d %H:%M:%S')"; echo "$_fstab_line"; } >> "$FSTAB_FILE"
+      success "Added to /etc/fstab — mount persists after reboot."
+    fi
+    systemctl daemon-reload 2>/dev/null || true
   fi
-  systemctl daemon-reload 2>/dev/null || true
 
   STORAGE_LABEL="smb://${SMB_SERVER_IP}/${SMB_SHARE}"
 
@@ -477,26 +583,37 @@ if [ "$STORAGE_TYPE" = "s3" ]; then
   if command -v s3fs &>/dev/null; then
     success "s3fs already installed: $(s3fs --version 2>&1 | head -1)"
   else
-    case "$_PM" in
-      apt)
-        apt-get update -qq >> "$LOG_FILE" 2>&1 || true
-        apt-get install -y s3fs >> "$LOG_FILE" 2>&1 || true
-        ;;
-      dnf|yum)
-        # Try direct install first, then EPEL
-        "${_PM}" install -y s3fs-fuse >> "$LOG_FILE" 2>&1 \
-          || { "${_PM}" install -y epel-release >> "$LOG_FILE" 2>&1 || true
-               "${_PM}" install -y s3fs-fuse >> "$LOG_FILE" 2>&1 || true; }
-        ;;
-      *)
-        error "Cannot detect package manager. Install s3fs-fuse manually: https://github.com/s3fs-fuse/s3fs-fuse"
-        exit 1
-        ;;
-    esac
+    if _IS_MAC; then
+      info "Installing macFUSE and s3fs via Homebrew..."
+      # macFUSE kernel extension — may require Privacy & Security approval after install
+      _brew install --cask macfuse >> "$LOG_FILE" 2>&1 || true
+      _brew install s3fs >> "$LOG_FILE" 2>&1 || true
+    else
+      case "$_PM" in
+        apt)
+          apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+          apt-get install -y s3fs >> "$LOG_FILE" 2>&1 || true
+          ;;
+        dnf|yum)
+          "${_PM}" install -y s3fs-fuse >> "$LOG_FILE" 2>&1 \
+            || { "${_PM}" install -y epel-release >> "$LOG_FILE" 2>&1 || true
+                 "${_PM}" install -y s3fs-fuse >> "$LOG_FILE" 2>&1 || true; }
+          ;;
+        *)
+          error "Cannot detect package manager. Install s3fs-fuse manually: https://github.com/s3fs-fuse/s3fs-fuse"
+          exit 1
+          ;;
+      esac
+    fi
 
     if ! command -v s3fs &>/dev/null; then
       error "s3fs-fuse not found after install. Check ${LOG_FILE} for details."
-      error "Manual install: apt-get install s3fs  OR  dnf install s3fs-fuse"
+      if _IS_MAC; then
+        error "macFUSE kernel extension may need approval:"
+        error "  System Settings > Privacy & Security > allow macFUSE, then rerun setup."
+      else
+        error "Manual install: apt-get install s3fs  OR  dnf install s3fs-fuse"
+      fi
       exit 1
     fi
     success "s3fs-fuse installed: $(s3fs --version 2>&1 | head -1)"
@@ -513,16 +630,20 @@ if [ "$STORAGE_TYPE" = "s3" ]; then
   mkdir -p "$S3_MOUNT_POINT"
 
   # Unmount any existing mount at this path before remounting
-  if mountpoint -q "$S3_MOUNT_POINT" 2>/dev/null; then
-    umount "$S3_MOUNT_POINT" 2>/dev/null || fusermount -u "$S3_MOUNT_POINT" 2>/dev/null || true
+  if _is_mounted "$S3_MOUNT_POINT"; then
+    if _IS_MAC; then
+      umount "$S3_MOUNT_POINT" 2>/dev/null || true
+    else
+      umount "$S3_MOUNT_POINT" 2>/dev/null || fusermount -u "$S3_MOUNT_POINT" 2>/dev/null || true
+    fi
   fi
 
   # Build s3fs options — path-style for MinIO and non-AWS endpoints
   _S3FS_OPTS="use_path_request_style,allow_other,ro,passwd_file=${_S3FS_PASSWD}"
   _S3FS_OPTS="${_S3FS_OPTS},url=${S3_ENDPOINT}"
 
-  # Enable allow_other in fuse config
-  if ! grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null; then
+  # Enable allow_other in fuse config (Linux only — macFUSE handles this differently)
+  if ! _IS_MAC && ! grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null; then
     echo "user_allow_other" >> /etc/fuse.conf
   fi
 
@@ -533,28 +654,56 @@ if [ "$STORAGE_TYPE" = "s3" ]; then
     s3fs "$S3_BUCKET" "$S3_MOUNT_POINT" -o "$_S3FS_OPTS" >> "$LOG_FILE" 2>&1
   fi
 
-  if mountpoint -q "$S3_MOUNT_POINT" 2>/dev/null; then
+  if _is_mounted "$S3_MOUNT_POINT"; then
     _file_count=$(find "$S3_MOUNT_POINT" -maxdepth 2 \( -name "*.pdf" -o -name "*.txt" -o -name "*.docx" -o -name "*.md" \) 2>/dev/null | wc -l)
     success "Mounted — ${_file_count} supported document(s) visible."
   else
     warn "Mount attempt returned an error. Check ${LOG_FILE} for details."
-    warn "The mount will be retried on next boot via fstab."
+    if _IS_MAC; then
+      warn "macFUSE extension may need Privacy & Security approval after reboot."
+    else
+      warn "The mount will be retried on next boot via fstab."
+    fi
   fi
 
-  # ── fstab entry (persistent across reboots) ──────────────────
-  if [ -n "$S3_PREFIX" ]; then
-    _fstab_s3_src="${S3_BUCKET}:/${S3_PREFIX}"
+  # ── Persist across reboots ───────────────────────────────────
+  if _IS_MAC; then
+    # macOS: launchd plist remounts on boot
+    _s3_plist="/Library/LaunchDaemons/io.zettabrain.s3mount.plist"
+    [ -n "$S3_PREFIX" ] && _s3_bucket_arg="${S3_BUCKET}:/${S3_PREFIX}" || _s3_bucket_arg="$S3_BUCKET"
+    _s3fs_bin=$(command -v s3fs 2>/dev/null || echo "/opt/homebrew/bin/s3fs")
+    mkdir -p /opt/zettabrain/logs
+    cat > "$_s3_plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>io.zettabrain.s3mount</string>
+  <key>ProgramArguments</key><array>
+    <string>${_s3fs_bin}</string>
+    <string>${_s3_bucket_arg}</string>
+    <string>${S3_MOUNT_POINT}</string>
+    <string>-o</string><string>${_S3FS_OPTS}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>/opt/zettabrain/logs/s3mount.log</string>
+</dict></plist>
+PLIST
+    launchctl load -w "$_s3_plist" >> "$LOG_FILE" 2>&1 || true
+    success "S3 mount configured to persist via launchd."
   else
-    _fstab_s3_src="$S3_BUCKET"
-  fi
-  _fstab_s3_line="${_fstab_s3_src}  ${S3_MOUNT_POINT}  fuse.s3fs  ${_S3FS_OPTS},_netdev  0  0"
-
-  if grep -qF "$S3_BUCKET" "$FSTAB_FILE" 2>/dev/null; then
-    warn "fstab entry for ${S3_BUCKET} already exists — skipping."
-  else
-    cp "$FSTAB_FILE" "${FSTAB_FILE}.bak.$(date +%Y%m%d%H%M%S)"
-    { echo ""; echo "# ZettaBrain S3 FUSE — $(date '+%Y-%m-%d %H:%M:%S')"; echo "$_fstab_s3_line"; } >> "$FSTAB_FILE"
-    success "Added to /etc/fstab — mount persists after reboot."
+    if [ -n "$S3_PREFIX" ]; then
+      _fstab_s3_src="${S3_BUCKET}:/${S3_PREFIX}"
+    else
+      _fstab_s3_src="$S3_BUCKET"
+    fi
+    _fstab_s3_line="${_fstab_s3_src}  ${S3_MOUNT_POINT}  fuse.s3fs  ${_S3FS_OPTS},_netdev  0  0"
+    if grep -qF "$S3_BUCKET" "$FSTAB_FILE" 2>/dev/null; then
+      warn "fstab entry for ${S3_BUCKET} already exists — skipping."
+    else
+      cp "$FSTAB_FILE" "${FSTAB_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+      { echo ""; echo "# ZettaBrain S3 FUSE — $(date '+%Y-%m-%d %H:%M:%S')"; echo "$_fstab_s3_line"; } >> "$FSTAB_FILE"
+      success "Added to /etc/fstab — mount persists after reboot."
+    fi
   fi
 
   PRIMARY_PATH="$S3_MOUNT_POINT"
@@ -565,103 +714,103 @@ fi
 
 # ================================================================
 # STEP 2/6 — NVIDIA DRIVERS
-# Installed unconditionally so Ollama (step 3) detects the GPU.
-# Safe to run when no NVIDIA hardware is present.
+# macOS: skipped — no NVIDIA hardware since 2019; Ollama uses Metal on Apple Silicon.
 # ================================================================
 step "Step 2/6: Installing NVIDIA drivers"
 
-# Detect NVIDIA GPU hardware first — skip entirely if none present
-_has_nvidia=false
-_install pciutils >> "$LOG_FILE" 2>&1 || true
-if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
-  _has_nvidia=true
-elif command -v lspci &>/dev/null && lspci 2>/dev/null | grep -qi "nvidia"; then
-  _has_nvidia=true
-elif [ -d /proc/driver/nvidia ]; then
-  _has_nvidia=true
-fi
-
-if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
-  _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
-  success "NVIDIA drivers already active: ${_gpu_name}"
-elif ! $_has_nvidia; then
-  info "No NVIDIA GPU detected — skipping driver installation. Ollama will use CPU."
-elif [ -z "$_PM" ]; then
-  warn "Cannot detect package manager — skipping NVIDIA driver install."
+if _IS_MAC; then
+  info "macOS detected — skipping NVIDIA step (Ollama uses Metal on Apple Silicon)."
 else
-  info "NVIDIA GPU detected — installing drivers..."
-  _nvidia_reboot=false
-
-  case "$_PM" in
-    apt)
-      apt-get install -y -qq "linux-headers-$(uname -r)" 2>/dev/null \
-        || apt-get install -y -qq linux-headers-generic >> "$LOG_FILE" 2>&1 || true
-      apt-get install -y -qq ubuntu-drivers-common >> "$LOG_FILE" 2>&1 || true
-      if command -v ubuntu-drivers &>/dev/null; then
-        info "Running ubuntu-drivers autoinstall (this may take a few minutes)..."
-        ubuntu-drivers autoinstall >> "$LOG_FILE" 2>&1 \
-          || apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
-      else
-        apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
-      fi
-      _nvidia_reboot=true
-      ;;
-
-    yum|dnf)
-      # Kernel headers for DKMS
-      "$_PM" install -y "kernel-devel-$(uname -r)" "kernel-headers-$(uname -r)" \
-        >> "$LOG_FILE" 2>&1 \
-        || "$_PM" install -y kernel-devel kernel-headers >> "$LOG_FILE" 2>&1 || true
-      # dkms is required by kmod-nvidia on RHEL 8/9
-      "$_PM" install -y dkms >> "$LOG_FILE" 2>&1 || true
-
-      _cuda_repo=""
-      case "${_OS_ID}" in
-        amzn)
-          case "${_OS_VER}" in
-            2)    _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo" ;;
-            202*) _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo" ;;
-          esac ;;
-        rhel|centos|rocky|almalinux)
-          _major="${_OS_VER%%.*}"
-          _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel${_major}/x86_64/cuda-rhel${_major}.repo" ;;
-        fedora)
-          _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora${_OS_VER}/x86_64/cuda-fedora${_OS_VER}.repo" ;;
-      esac
-
-      if [ -n "$_cuda_repo" ]; then
-        info "Adding NVIDIA CUDA repository..."
-        # DNF5 (RHEL 10+) dropped config-manager --add-repo; use repo file directly
-        curl -fsSL "$_cuda_repo" -o /etc/yum.repos.d/cuda-nvidia.repo >> "$LOG_FILE" 2>&1 || true
-        "$_PM" clean expire-cache >> "$LOG_FILE" 2>&1 || true
-        info "Installing cuda-drivers (this may take several minutes)..."
-        # RHEL 10 / DNF5: modularity removed — use direct package + --nobest fallback
-        _major="${_OS_VER%%.*}"
-        if [ "${_major}" -ge 10 ] 2>/dev/null; then
-          "$_PM" install -y cuda-drivers --nobest --skip-broken >> "$LOG_FILE" 2>&1 || true
-        else
-          # RHEL 8/9: try module stream first, fall back to direct package
-          "$_PM" module install -y "nvidia-driver:latest-dkms" >> "$LOG_FILE" 2>&1 \
-            || "$_PM" install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
-        fi
-      else
-        warn "Unrecognised OS (${_OS_ID} ${_OS_VER}) — skipping NVIDIA repo setup."
-        warn "Install drivers manually: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/"
-      fi
-      _nvidia_reboot=true
-      ;;
-  esac
-
-  modprobe nvidia >> "$LOG_FILE" 2>&1 || true
-  sleep 2
+  # Detect NVIDIA GPU hardware first — skip entirely if none present
+  _has_nvidia=false
+  _install pciutils >> "$LOG_FILE" 2>&1 || true
+  if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
+    _has_nvidia=true
+  elif command -v lspci &>/dev/null && lspci 2>/dev/null | grep -qi "nvidia"; then
+    _has_nvidia=true
+  elif [ -d /proc/driver/nvidia ]; then
+    _has_nvidia=true
+  fi
 
   if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
     _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
-    success "NVIDIA drivers active — GPU detected: ${_gpu_name}"
-  elif $_nvidia_reboot; then
-    warn "NVIDIA drivers installed — reboot required to activate the kernel module."
-    warn "After reboot, run: sudo systemctl restart ollama"
-    warn "  → Continuing; Ollama will use CPU until reboot."
+    success "NVIDIA drivers already active: ${_gpu_name}"
+  elif ! $_has_nvidia; then
+    info "No NVIDIA GPU detected — skipping driver installation. Ollama will use CPU."
+  elif [ -z "$_PM" ]; then
+    warn "Cannot detect package manager — skipping NVIDIA driver install."
+  else
+    info "NVIDIA GPU detected — installing drivers..."
+    _nvidia_reboot=false
+
+    case "$_PM" in
+      apt)
+        apt-get install -y -qq "linux-headers-$(uname -r)" 2>/dev/null \
+          || apt-get install -y -qq linux-headers-generic >> "$LOG_FILE" 2>&1 || true
+        apt-get install -y -qq ubuntu-drivers-common >> "$LOG_FILE" 2>&1 || true
+        if command -v ubuntu-drivers &>/dev/null; then
+          info "Running ubuntu-drivers autoinstall (this may take a few minutes)..."
+          ubuntu-drivers autoinstall >> "$LOG_FILE" 2>&1 \
+            || apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
+        else
+          apt-get install -y -qq nvidia-driver-535-server >> "$LOG_FILE" 2>&1 || true
+        fi
+        _nvidia_reboot=true
+        ;;
+
+      yum|dnf)
+        # Kernel headers for DKMS
+        "$_PM" install -y "kernel-devel-$(uname -r)" "kernel-headers-$(uname -r)" \
+          >> "$LOG_FILE" 2>&1 \
+          || "$_PM" install -y kernel-devel kernel-headers >> "$LOG_FILE" 2>&1 || true
+        # dkms is required by kmod-nvidia on RHEL 8/9
+        "$_PM" install -y dkms >> "$LOG_FILE" 2>&1 || true
+
+        _cuda_repo=""
+        case "${_OS_ID}" in
+          amzn)
+            case "${_OS_VER}" in
+              2)    _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo" ;;
+              202*) _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo" ;;
+            esac ;;
+          rhel|centos|rocky|almalinux)
+            _major="${_OS_VER%%.*}"
+            _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/rhel${_major}/x86_64/cuda-rhel${_major}.repo" ;;
+          fedora)
+            _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/fedora${_OS_VER}/x86_64/cuda-fedora${_OS_VER}.repo" ;;
+        esac
+
+        if [ -n "$_cuda_repo" ]; then
+          info "Adding NVIDIA CUDA repository..."
+          curl -fsSL "$_cuda_repo" -o /etc/yum.repos.d/cuda-nvidia.repo >> "$LOG_FILE" 2>&1 || true
+          "$_PM" clean expire-cache >> "$LOG_FILE" 2>&1 || true
+          info "Installing cuda-drivers (this may take several minutes)..."
+          _major="${_OS_VER%%.*}"
+          if [ "${_major}" -ge 10 ] 2>/dev/null; then
+            "$_PM" install -y cuda-drivers --nobest --skip-broken >> "$LOG_FILE" 2>&1 || true
+          else
+            "$_PM" module install -y "nvidia-driver:latest-dkms" >> "$LOG_FILE" 2>&1 \
+              || "$_PM" install -y cuda-drivers >> "$LOG_FILE" 2>&1 || true
+          fi
+        else
+          warn "Unrecognised OS (${_OS_ID} ${_OS_VER}) — skipping NVIDIA repo setup."
+          warn "Install drivers manually: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/"
+        fi
+        _nvidia_reboot=true
+        ;;
+    esac
+
+    modprobe nvidia >> "$LOG_FILE" 2>&1 || true
+    sleep 2
+
+    if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
+      _gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+      success "NVIDIA drivers active — GPU detected: ${_gpu_name}"
+    elif $_nvidia_reboot; then
+      warn "NVIDIA drivers installed — reboot required to activate the kernel module."
+      warn "After reboot, run: sudo systemctl restart ollama"
+      warn "  → Continuing; Ollama will use CPU until reboot."
+    fi
   fi
 fi
 
@@ -670,39 +819,57 @@ fi
 # ================================================================
 step "Step 3/6: Installing Ollama"
 
-# zstd is required by Ollama's installer for archive extraction
-if ! command -v zstd &>/dev/null; then
-  info "Installing zstd (required by Ollama)..."
-  case "$_PM" in
-    apt)
-      apt-get update -qq >> "$LOG_FILE" 2>&1 || true
-      apt-get install -y zstd >> "$LOG_FILE" 2>&1 || true ;;
-    dnf|yum)
-      "$_PM" install -y zstd >> "$LOG_FILE" 2>&1 || true ;;
-  esac
-  command -v zstd &>/dev/null || warn "zstd install failed — Ollama extraction may fail."
-fi
-
 if command -v ollama &>/dev/null; then
   info "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"
 else
   info "Downloading and installing Ollama..."
-  if curl -fsSL https://ollama.com/install.sh | sh >> "$LOG_FILE" 2>&1; then
-    success "Ollama installed."
+  if _IS_MAC; then
+    if _brew install ollama >> "$LOG_FILE" 2>&1; then
+      success "Ollama installed via Homebrew."
+    else
+      error "Ollama installation failed. Check log: ${LOG_FILE}"
+      exit 1
+    fi
   else
-    error "Ollama installation failed. Check log: ${LOG_FILE}"
-    exit 1
+    # zstd is required by Ollama's Linux installer for archive extraction
+    if ! command -v zstd &>/dev/null; then
+      info "Installing zstd (required by Ollama)..."
+      case "$_PM" in
+        apt)
+          apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+          apt-get install -y zstd >> "$LOG_FILE" 2>&1 || true ;;
+        dnf|yum)
+          "$_PM" install -y zstd >> "$LOG_FILE" 2>&1 || true ;;
+      esac
+      command -v zstd &>/dev/null || warn "zstd install failed — Ollama extraction may fail."
+    fi
+    if curl -fsSL https://ollama.com/install.sh | sh >> "$LOG_FILE" 2>&1; then
+      success "Ollama installed."
+    else
+      error "Ollama installation failed. Check log: ${LOG_FILE}"
+      exit 1
+    fi
   fi
 fi
 
-# Ensure service is enabled and running
-systemctl enable ollama >> "$LOG_FILE" 2>&1 || true
-if systemctl is-active --quiet ollama 2>/dev/null; then
-  info "Ollama service already running."
+# Ensure Ollama service is running
+if _IS_MAC; then
+  if _brew services list 2>/dev/null | grep -q "ollama.*started"; then
+    info "Ollama service already running."
+  else
+    info "Starting Ollama service..."
+    _brew services start ollama >> "$LOG_FILE" 2>&1 || true
+    sleep 5
+  fi
 else
-  info "Starting Ollama service..."
-  systemctl start ollama >> "$LOG_FILE" 2>&1 || true
-  sleep 5
+  systemctl enable ollama >> "$LOG_FILE" 2>&1 || true
+  if systemctl is-active --quiet ollama 2>/dev/null; then
+    info "Ollama service already running."
+  else
+    info "Starting Ollama service..."
+    systemctl start ollama >> "$LOG_FILE" 2>&1 || true
+    sleep 5
+  fi
 fi
 
 # Wait for Ollama API to be ready (up to 60 seconds)
@@ -717,12 +884,17 @@ if curl -s "$OLLAMA_URL" &>/dev/null; then
   success "Ollama API is ready at ${OLLAMA_URL}"
 else
   error "Ollama did not start within 60 seconds."
-  error "Check: journalctl -u ollama -n 30"
+  if _IS_MAC; then
+    error "Check: brew services list | grep ollama"
+    error "  Or start manually in another terminal: ollama serve"
+  else
+    error "Check: journalctl -u ollama -n 30"
+  fi
   exit 1
 fi
 
 # ================================================================
-# STEP 3/5 — PULL AI MODELS
+# STEP 4/6 — PULL AI MODELS
 # ================================================================
 step "Step 4/6: Pulling required AI models"
 
@@ -771,16 +943,6 @@ if [ "$_GPU_TYPE" = "none" ] && [ "$(uname -m 2>/dev/null)" = "arm64" ]; then
     _GPU_NAME="Apple Silicon (unified memory ${_ram_gb}GB)"
   fi
 fi
-
-# Map VRAM to model recommendations
-declare -A _MODEL_OPTIONS=(
-  ["llama3.2:3b"]="Llama 3.2 3B   — fastest, ~2GB,  good for quick answers"
-  ["llama3.1:8b"]="Llama 3.1 8B   — balanced, ~5GB, recommended default"
-  ["mistral:7b"]="Mistral 7B      — fast, ~4GB,      strong reasoning"
-  ["llama3.1:13b"]="Llama 3.1 13B — better, ~8GB,   needs 12GB+ VRAM"
-  ["qwen2.5:14b"]="Qwen 2.5 14B   — excellent, ~9GB, needs 16GB+ VRAM"
-  ["qwen2.5:32b"]="Qwen 2.5 32B   — best quality, ~20GB, needs 24GB+ VRAM"
-)
 
 if [ "$_GPU_TYPE" = "none" ] || [ "$_VRAM_GB" -lt 4 ]; then
   _RECOMMENDED_MODEL="llama3.2:3b"
@@ -846,7 +1008,13 @@ else
   fi
 fi
 
-PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
+if _IS_MAC; then
+  PRIMARY_IP=$(ipconfig getifaddr en0 2>/dev/null \
+    || ipconfig getifaddr en1 2>/dev/null \
+    || echo "127.0.0.1")
+else
+  PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
+fi
 
 # ================================================================
 # SAVE CONFIGURATION
@@ -856,7 +1024,7 @@ PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
 _upsert() {
   local key="$1" val="$2"
   if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${val}|" "$CONFIG_FILE"
+    _sed_i "s|^${key}=.*|${key}=${val}|" "$CONFIG_FILE"
   else
     echo "${key}=${val}" >> "$CONFIG_FILE"
   fi
@@ -943,46 +1111,56 @@ if [ "$ZETTABRAIN_TLS_PROVIDER" = "caddy" ]; then
   [ -z "$CADDY_DOMAIN" ] && error "Domain is required for Caddy."
 
   info "Installing Caddy..."
-  if [ -f /etc/os-release ]; then . /etc/os-release; fi
-  case "${ID:-}" in
-    ubuntu|debian|linuxmint|pop)
-      apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https 2>/dev/null || true
-      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-        | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
-      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-        | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
-      apt-get update -qq && apt-get install -y -qq caddy
-      ;;
-    amzn|rhel|centos|fedora|rocky|almalinux)
-      # dnf-plugins-core provides `dnf copr` and `dnf config-manager`
-      "$_PM" install -y dnf-plugins-core >> "$LOG_FILE" 2>&1 || true
-      # Try COPR repo first, then direct package, then binary fallback
-      if ! "$_PM" copr enable -y @caddy/caddy >> "$LOG_FILE" 2>&1 \
-           || ! "$_PM" install -y caddy >> "$LOG_FILE" 2>&1; then
-        if ! "$_PM" install -y caddy >> "$LOG_FILE" 2>&1; then
-          info "Falling back to Caddy binary install..."
-          _caddy_ver=$(curl -sL https://api.github.com/repos/caddyserver/caddy/releases/latest \
-            | grep '"tag_name"' | cut -d'"' -f4)
-          curl -sL "https://github.com/caddyserver/caddy/releases/download/${_caddy_ver}/caddy_${_caddy_ver#v}_linux_amd64.tar.gz" \
-            | tar xz -C /usr/local/bin caddy >> "$LOG_FILE" 2>&1
+  if _IS_MAC; then
+    _brew install caddy >> "$LOG_FILE" 2>&1 || true
+    # Caddyfile location follows brew prefix (arm64 vs Intel)
+    if [ "$(uname -m)" = "arm64" ]; then
+      _CADDY_CONF="/opt/homebrew/etc/Caddyfile"
+    else
+      _CADDY_CONF="/usr/local/etc/Caddyfile"
+    fi
+    mkdir -p "$(dirname "$_CADDY_CONF")"
+  else
+    if [ -f /etc/os-release ]; then . /etc/os-release; fi
+    case "${ID:-}" in
+      ubuntu|debian|linuxmint|pop)
+        apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https 2>/dev/null || true
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+          | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+          | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+        apt-get update -qq && apt-get install -y -qq caddy
+        ;;
+      amzn|rhel|centos|fedora|rocky|almalinux)
+        "$_PM" install -y dnf-plugins-core >> "$LOG_FILE" 2>&1 || true
+        if ! "$_PM" copr enable -y @caddy/caddy >> "$LOG_FILE" 2>&1 \
+             || ! "$_PM" install -y caddy >> "$LOG_FILE" 2>&1; then
+          if ! "$_PM" install -y caddy >> "$LOG_FILE" 2>&1; then
+            info "Falling back to Caddy binary install..."
+            _caddy_ver=$(curl -sL https://api.github.com/repos/caddyserver/caddy/releases/latest \
+              | grep '"tag_name"' | cut -d'"' -f4)
+            curl -sL "https://github.com/caddyserver/caddy/releases/download/${_caddy_ver}/caddy_${_caddy_ver#v}_linux_amd64.tar.gz" \
+              | tar xz -C /usr/local/bin caddy >> "$LOG_FILE" 2>&1
+          fi
         fi
-      fi
-      ;;
-    *)
-      warn "Unknown OS — attempting binary install of Caddy..."
-      _caddy_ver=$(curl -sL https://api.github.com/repos/caddyserver/caddy/releases/latest \
-        | grep '"tag_name"' | cut -d'"' -f4)
-      curl -sL "https://github.com/caddyserver/caddy/releases/download/${_caddy_ver}/caddy_${_caddy_ver#v}_linux_amd64.tar.gz" \
-        | tar xz -C /usr/local/bin caddy >> "$LOG_FILE" 2>&1
-      ;;
-  esac
+        ;;
+      *)
+        warn "Unknown OS — attempting binary install of Caddy..."
+        _caddy_ver=$(curl -sL https://api.github.com/repos/caddyserver/caddy/releases/latest \
+          | grep '"tag_name"' | cut -d'"' -f4)
+        curl -sL "https://github.com/caddyserver/caddy/releases/download/${_caddy_ver}/caddy_${_caddy_ver#v}_linux_amd64.tar.gz" \
+          | tar xz -C /usr/local/bin caddy >> "$LOG_FILE" 2>&1
+        ;;
+    esac
+    _CADDY_CONF="/etc/caddy/Caddyfile"
+    mkdir -p /etc/caddy /var/log/caddy
+  fi
 
-  command -v caddy &>/dev/null || error "Caddy installation failed."
+  command -v caddy &>/dev/null || { error "Caddy installation failed."; exit 1; }
   success "Caddy installed: $(caddy version)"
 
   # Write Caddyfile
-  mkdir -p /etc/caddy
-  cat > /etc/caddy/Caddyfile <<CADDY
+  cat > "$_CADDY_CONF" <<CADDY
 ${CADDY_DOMAIN} {
     reverse_proxy localhost:7860
     encode gzip
@@ -992,20 +1170,21 @@ ${CADDY_DOMAIN} {
 }
 CADDY
 
-  mkdir -p /var/log/caddy
-  # Enable and start Caddy
-  if command -v systemctl &>/dev/null; then
-    systemctl enable --now caddy 2>/dev/null || true
-    systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+  if _IS_MAC; then
+    _brew services restart caddy >> "$LOG_FILE" 2>&1 || true
   else
-    caddy start --config /etc/caddy/Caddyfile 2>/dev/null || true
+    if command -v systemctl &>/dev/null; then
+      systemctl enable --now caddy 2>/dev/null || true
+      systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+    else
+      caddy start --config "$_CADDY_CONF" 2>/dev/null || true
+    fi
   fi
 
   success "Caddy configured for ${CADDY_DOMAIN}"
   info    "ZettaBrain server will run on HTTP localhost:7860 — Caddy handles HTTPS."
   info    "DNS: ensure ${CADDY_DOMAIN} points to this server's public IP."
 
-  # Store domain in config
   _upsert "ZETTABRAIN_CADDY_DOMAIN" "$CADDY_DOMAIN"
 
 # ── Option 2: Self-signed ─────────────────────────────────────────
@@ -1014,7 +1193,7 @@ elif [ "$ZETTABRAIN_TLS_PROVIDER" = "self-signed" ]; then
   if [ -f "$CERT_DIR/cert.pem" ] && [ -f "$CERT_DIR/key.pem" ]; then
     success "TLS certificate already present at $CERT_DIR"
   else
-    # Ensure openssl is available (may need installing on RHEL minimal installs)
+    # Ensure openssl is available
     command -v openssl &>/dev/null || _install openssl
     if command -v openssl &>/dev/null; then
       info "Generating self-signed TLS certificate (valid 10 years)..."
@@ -1041,7 +1220,7 @@ else
   warn "This is only suitable for trusted local networks."
 fi
 
-# ── Open firewall port 7860 (firewalld on RHEL, ufw on Ubuntu) ───
+# ── Open firewall port 7860 (firewalld on RHEL, ufw on Ubuntu; skipped on macOS) ──
 _open_port 7860
 # Caddy also needs 80 + 443 for Let's Encrypt ACME challenge
 if [ "$ZETTABRAIN_TLS_PROVIDER" = "caddy" ]; then
@@ -1053,7 +1232,7 @@ fi
 _selinux_permissive_check
 
 # ================================================================
-# STEP 5/5 — BUILD RAG VECTOR STORE
+# STEP 6/6 — BUILD RAG VECTOR STORE
 # ================================================================
 step "Step 6/6: Building RAG vector store"
 
@@ -1064,6 +1243,7 @@ PYTHON_BIN=""
 for _venv in \
     /root/.local/share/pipx/venvs/zettabrain-rag \
     /home/*/.local/share/pipx/venvs/zettabrain-rag \
+    /Users/*/.local/share/pipx/venvs/zettabrain-rag \
     /opt/zettabrain/venv; do
   for _py in \
       "${_venv}/bin/python3" \
@@ -1097,7 +1277,11 @@ DOC_COUNT=0
 
 if [ -z "$PYTHON_BIN" ]; then
   warn "No Python with langchain found. Build the vector store manually:"
-  warn "  find /root/.local/share/pipx/venvs/zettabrain-rag -name 'python*' -type f | head -3"
+  if _IS_MAC; then
+    warn "  find ~/.local/share/pipx/venvs/zettabrain-rag -name 'python*' -type f | head -3"
+  else
+    warn "  find /root/.local/share/pipx/venvs/zettabrain-rag -name 'python*' -type f | head -3"
+  fi
   warn "  zettabrain-ingest"
 
 elif [ ! -f "$INGEST_SCRIPT" ]; then
@@ -1117,8 +1301,6 @@ else
     echo ""
     cd "$DEPLOY_DIR" || true
 
-    # Use the ingest script (not the chat/RAG script) so chunking is consistent
-    # with subsequent `zettabrain-ingest` runs and duplicates are avoided.
     if ZETTABRAIN_DOCS="$PRIMARY_PATH" "$PYTHON_BIN" "$INGEST_SCRIPT"; then
       echo ""
       success "Vector store built successfully."
@@ -1132,14 +1314,70 @@ else
 fi
 
 # ================================================================
-# INSTALL SYSTEMD SERVICE FOR WEB SERVER
+# INSTALL SERVICE FOR WEB SERVER
 # ================================================================
 step "Installing ZettaBrain as a system service"
 
 _server_bin=$(command -v zettabrain-server 2>/dev/null \
               || echo "/root/.local/bin/zettabrain-server")
 
-cat > /etc/systemd/system/zettabrain.service << SVCEOF
+if _IS_MAC; then
+  # ── macOS: launchd plist at /Library/LaunchDaemons ──────────
+  _ZB_PLIST="/Library/LaunchDaemons/io.zettabrain.server.plist"
+  _ZB_LOG_DIR="/opt/zettabrain/logs"
+  mkdir -p "$_ZB_LOG_DIR"
+
+  # Prefer the pipx-installed binary in the user's home
+  if [ -n "$_BREW_USER" ]; then
+    _user_server="/Users/${_BREW_USER}/.local/bin/zettabrain-server"
+    [ -f "$_user_server" ] && _server_bin="$_user_server"
+  fi
+
+  cat > "$_ZB_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.zettabrain.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${_server_bin}</string>
+    <string>--host</string><string>0.0.0.0</string>
+    <string>--port</string><string>7860</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>WorkingDirectory</key>
+  <string>${DEPLOY_DIR}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>${_ZB_LOG_DIR}/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>${_ZB_LOG_DIR}/server-error.log</string>
+</dict>
+</plist>
+PLIST
+
+  launchctl unload "$_ZB_PLIST" 2>/dev/null || true
+  launchctl load -w "$_ZB_PLIST" >> "$LOG_FILE" 2>&1 || true
+  sleep 3
+
+  if launchctl list 2>/dev/null | grep -q "io.zettabrain.server"; then
+    success "ZettaBrain web server started and enabled on boot (launchd)."
+  else
+    warn "Web server did not start automatically."
+    warn "Start manually: zettabrain-server --no-tls --port 7860"
+    warn "Check logs: tail -f ${_ZB_LOG_DIR}/server-error.log"
+  fi
+
+else
+  # ── Linux: systemd unit ──────────────────────────────────────
+  cat > /etc/systemd/system/zettabrain.service << SVCEOF
 [Unit]
 Description=ZettaBrain RAG Web Server
 After=network-online.target ollama.service
@@ -1162,16 +1400,17 @@ EnvironmentFile=-${CONFIG_FILE}
 WantedBy=multi-user.target
 SVCEOF
 
-systemctl daemon-reload
-systemctl enable zettabrain >> "$LOG_FILE" 2>&1 || true
-systemctl restart zettabrain >> "$LOG_FILE" 2>&1 || true
-sleep 3
+  systemctl daemon-reload
+  systemctl enable zettabrain >> "$LOG_FILE" 2>&1 || true
+  systemctl restart zettabrain >> "$LOG_FILE" 2>&1 || true
+  sleep 3
 
-if systemctl is-active --quiet zettabrain 2>/dev/null; then
-  success "ZettaBrain web server started and enabled on boot."
-else
-  warn "Web server did not start automatically."
-  warn "Start manually: zettabrain-server --no-tls --port 7860"
+  if systemctl is-active --quiet zettabrain 2>/dev/null; then
+    success "ZettaBrain web server started and enabled on boot."
+  else
+    warn "Web server did not start automatically."
+    warn "Start manually: zettabrain-server --no-tls --port 7860"
+  fi
 fi
 
 # ================================================================
@@ -1179,7 +1418,7 @@ fi
 # ================================================================
 echo ""
 echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║        ZettaBrain Setup Complete!  🎉                ║${NC}"
+echo -e "${GREEN}${BOLD}║        ZettaBrain Setup Complete!                    ║${NC}"
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  Storage type : ${GREEN}${STORAGE_TYPE^^}${NC}"
@@ -1200,7 +1439,12 @@ echo -e "  Add more storage  : ${YELLOW}sudo zettabrain-storage add${NC}"
 echo -e "  CLI chat          : ${YELLOW}zettabrain-chat${NC}"
 echo -e "  Ingest documents  : ${YELLOW}zettabrain-ingest --rebuild${NC}"
 echo -e "  Check status      : ${YELLOW}zettabrain-status${NC}"
-echo -e "  View server logs  : ${YELLOW}journalctl -u zettabrain -f${NC}"
+if _IS_MAC; then
+  echo -e "  View server logs  : ${YELLOW}tail -f /opt/zettabrain/logs/server.log${NC}"
+  echo -e "  Ollama service    : ${YELLOW}brew services list | grep ollama${NC}"
+else
+  echo -e "  View server logs  : ${YELLOW}journalctl -u zettabrain -f${NC}"
+fi
 echo ""
 
 log "Setup complete. Type=${STORAGE_TYPE} Path=${PRIMARY_PATH} Docs=${DOC_COUNT}"
