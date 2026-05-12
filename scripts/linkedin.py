@@ -51,7 +51,7 @@ API_BASE        = "https://api.linkedin.com/v2"
 REDIRECT_URI    = "http://localhost:8080/callback"
 # w_member_social — available via "Share on LinkedIn" product (no approval needed)
 # w_organization_social / rw_organization_admin — require "Marketing Developer Platform" (gated)
-SCOPES          = "w_member_social r_liteprofile"
+SCOPES          = "w_member_social"
 DEFAULT_TOKEN_FILE = Path.home() / ".zettabrain" / "linkedin_token.json"
 
 # ── Pre-drafted posts ────────────────────────────────────────────
@@ -183,10 +183,36 @@ def _headers(token):
 
 
 def _get_member_urn(token):
-    resp = requests.get(f"{API_BASE}/me", headers=_headers(token))
-    resp.raise_for_status()
-    member_id = resp.json().get("id")
-    return f"urn:li:person:{member_id}"
+    # Prefer env var (set LINKEDIN_MEMBER_ID in .env)
+    member_id = os.environ.get("LINKEDIN_MEMBER_ID", "").strip()
+    if member_id:
+        return f"urn:li:member:{member_id}"
+    # Try OpenID Connect userinfo (needs 'openid profile' scope)
+    try:
+        resp = requests.get(f"{API_BASE}/userinfo", headers={"Authorization": f"Bearer {token}"})
+        resp.raise_for_status()
+        sub = resp.json().get("sub")
+        if sub:
+            return f"urn:li:person:{sub}"
+    except requests.HTTPError:
+        pass
+    # Try legacy /v2/me (needs r_liteprofile scope)
+    try:
+        resp = requests.get(f"{API_BASE}/me", headers=_headers(token))
+        resp.raise_for_status()
+        mid = resp.json().get("id")
+        if mid:
+            return f"urn:li:person:{mid}"
+    except requests.HTTPError:
+        pass
+    print("\n  ERROR: Cannot detect member ID. Set LINKEDIN_MEMBER_ID in .env:")
+    print("  LINKEDIN_MEMBER_ID=<your numeric LinkedIn ID>")
+    print("\n  To find your numeric ID:")
+    print("  1. Open linkedin.com in your browser (logged in)")
+    print("  2. Press F12 → Network tab → reload page")
+    print("  3. Click any 'api.linkedin.com' request → look for 'id' or 'memberId' in response")
+    print("  OR: linkedin.com → Me → Settings → scroll to find numeric ID in URL")
+    sys.exit(1)
 
 
 # ── OAuth flow ───────────────────────────────────────────────────
@@ -300,10 +326,8 @@ def cmd_post(args):
 
     token = token_data["access_token"]
 
-    # Determine author: org URN if token has org scope, else member URN
-    member_urn = token_data.get("member_urn")
-    if not member_urn:
-        member_urn = _get_member_urn(token)
+    # Always resolve fresh — env var takes priority over cached token value
+    member_urn = _get_member_urn(token)
 
     # Try org URN first; fall back to member URN if forbidden
     def _post_with_fallback(text):
